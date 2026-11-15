@@ -1,0 +1,6 @@
+{
+  "name": "TAP9JA",
+  "description": "One Link. All Your Hustle. The Creator Bio Link Platform for Africa.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
