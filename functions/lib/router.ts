@@ -6,7 +6,15 @@ import {
   THEMES,
   type ThemeId,
 } from '../../src/shared/platforms.ts';
-import { generateId, hashPassword, signJwt, verifyJwt, verifyPassword } from './crypto.ts';
+import {
+  generateId,
+  generateResetCode,
+  hashPassword,
+  sha256Hex,
+  signJwt,
+  verifyJwt,
+  verifyPassword,
+} from './crypto.ts';
 import { ensureSchema, type D1DatabaseLike } from './db.ts';
 
 export interface EnvBindings {
@@ -17,6 +25,9 @@ export interface EnvBindings {
   ADMIN_EMAIL?: string;
   ADMIN_PASSWORD?: string;
   PRO_PRICE?: string;
+  RESEND_API_KEY?: string;
+  RESEND_FROM_EMAIL?: string;
+  APP_URL?: string;
 }
 
 interface UserRow {
@@ -157,6 +168,57 @@ function isValidHttpUrl(val: string): boolean {
   } catch {
     return false;
   }
+}
+
+function escapeHtml(raw: string): string {
+  return raw
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function buildPasswordResetEmailHtml(params: { name: string; code: string; resetUrl: string }): string {
+  const safeName = escapeHtml(params.name || 'Creator');
+  const safeCode = escapeHtml(params.code);
+  const safeUrl = escapeHtml(params.resetUrl);
+  return `<!doctype html>
+<html>
+  <body style="margin:0;padding:24px;background-color:#f8fafc;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;color:#0f172a;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:520px;margin:0 auto;background:#ffffff;border-radius:24px;border:1px solid #e2e8f0;overflow:hidden;">
+      <tr>
+        <td style="padding:28px 32px;background:linear-gradient(135deg,#059669 0%,#6d28d9 100%);color:#ffffff;">
+          <div style="font-size:20px;font-weight:800;letter-spacing:-0.02em;">9J TAP9JA</div>
+          <div style="font-size:13px;opacity:0.9;margin-top:4px;">One Link. All Your Hustle.</div>
+        </td>
+      </tr>
+      <tr>
+        <td style="padding:32px;">
+          <h1 style="margin:0 0 12px;font-size:20px;font-weight:700;color:#0f172a;">Reset your password</h1>
+          <p style="margin:0 0 20px;font-size:14px;line-height:1.6;color:#475569;">
+            Hi ${safeName}, we received a request to reset your TAP9JA account password. Enter the security code below on the reset page:
+          </p>
+          <div style="margin:0 0 24px;padding:18px 20px;background:#f1f5f9;border:1px solid #cbd5e1;border-radius:16px;text-align:center;">
+            <div style="font-size:11px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:#64748b;margin-bottom:6px;">Security Code</div>
+            <div style="font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:32px;font-weight:800;letter-spacing:0.22em;color:#0f172a;">${safeCode}</div>
+          </div>
+          <div style="text-align:center;margin:0 0 24px;">
+            <a href="${safeUrl}" style="display:inline-block;padding:14px 28px;border-radius:16px;background:linear-gradient(135deg,#059669 0%,#6d28d9 100%);color:#ffffff;font-size:14px;font-weight:700;text-decoration:none;">
+              Reset Password
+            </a>
+          </div>
+          <p style="margin:0 0 10px;font-size:12px;line-height:1.6;color:#64748b;">
+            This security code expires in <strong>15 minutes</strong> and can only be used once.
+          </p>
+          <p style="margin:0;font-size:12px;line-height:1.6;color:#64748b;">
+            If you did not request a password reset, you can safely ignore this email. Your account remains secure.
+          </p>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>`;
 }
 
 async function verifyPaystackTransaction(
@@ -348,6 +410,189 @@ export async function handleApiRequest(req: Request, env: EnvBindings): Promise<
     const synced = await syncUserProStatus(env.DB, user);
     const token = await signJwt({ sub: synced.id, role: 'user', email: synced.email, username: synced.username }, secret);
     return jsonResponse({ token, user: sanitizeUser(synced) });
+  }
+
+  // Forgot Password (self-service email security code via Resend)
+  if (method === 'POST' && path === '/api/auth/forgot-password') {
+    const resendKey = (env.RESEND_API_KEY || '').trim();
+    if (!resendKey) {
+      return jsonResponse({ error: 'Password reset email service (RESEND_API_KEY) is not configured.' }, 500);
+    }
+
+    const body = await parseJsonBody<{ email?: string }>(req);
+    const email = (body?.email || '').trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return jsonResponse({ error: 'Please enter a valid email address.' }, 400);
+    }
+
+    const genericSuccess = {
+      ok: true,
+      message: 'If an account exists for that email, we sent a 6-digit security code and reset link.',
+    };
+
+    // Rate-limit per email (60s cooldown & max 3 requests per 15 mins) before revealing anything
+    const fifteenMinsAgo = new Date(Date.now() - 15 * 60 * 1000).toISOString();
+    const rateRow = await env.DB.prepare(
+      'SELECT COUNT(*) as cnt, MAX(created_at) as last_created FROM password_resets WHERE email = ? AND created_at > ?'
+    )
+      .bind(email, fifteenMinsAgo)
+      .first<{ cnt: number; last_created: string | null }>();
+
+    if ((rateRow?.cnt ?? 0) >= 3) {
+      return jsonResponse(genericSuccess);
+    }
+    if (rateRow?.last_created && Date.now() - Date.parse(rateRow.last_created) < 60 * 1000) {
+      return jsonResponse(genericSuccess);
+    }
+
+    const user = await env.DB.prepare('SELECT id, email, name, is_blocked FROM users WHERE email = ?')
+      .bind(email)
+      .first<{ id: string; email: string; name: string; is_blocked: number }>();
+
+    if (!user || user.is_blocked === 1) {
+      return jsonResponse(genericSuccess);
+    }
+
+    // Invalidate any prior unused reset codes for this user
+    await env.DB.prepare('UPDATE password_resets SET used = 1 WHERE user_id = ? AND used = 0')
+      .bind(user.id)
+      .run();
+
+    const resetId = generateId();
+    const code = generateResetCode();
+    const codeHash = await sha256Hex(`${resetId}:${code}`);
+    const nowIso = new Date().toISOString();
+    const expiresAt = new Date(Date.now() + 15 * 60 * 1000).toISOString();
+
+    await env.DB.prepare(
+      `INSERT INTO password_resets (id, user_id, email, code_hash, attempts, used, expires_at, created_at)
+       VALUES (?, ?, ?, ?, 0, 0, ?, ?)`
+    )
+      .bind(resetId, user.id, user.email, codeHash, expiresAt, nowIso)
+      .run();
+
+    const rawAppUrl = (env.APP_URL || '').trim();
+    const baseOrigin =
+      rawAppUrl && /^https?:\/\//i.test(rawAppUrl) ? rawAppUrl.replace(/\/+$/, '') : new URL(req.url).origin;
+    const resetUrl = `${baseOrigin}/reset-password?email=${encodeURIComponent(user.email)}`;
+
+    const rawFrom = (env.RESEND_FROM_EMAIL || 'nkemjika@tap9ja.com.ng').trim() || 'nkemjika@tap9ja.com.ng';
+    const fromHeader = rawFrom.includes('<') ? rawFrom : `TAP9JA <${rawFrom}>`;
+
+    const resendRes = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${resendKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        from: fromHeader,
+        to: [user.email],
+        subject: `Your TAP9JA password reset code: ${code}`,
+        html: buildPasswordResetEmailHtml({ name: user.name, code, resetUrl }),
+        text: `Hi ${user.name},\n\nYour TAP9JA password reset security code is: ${code}\n\nReset your password here: ${resetUrl}\n\nThis code expires in 15 minutes and can only be used once.\n\nIf you did not request this, you can safely ignore this email.`,
+      }),
+    });
+
+    if (!resendRes.ok) {
+      const errText = await resendRes.text().catch(() => '');
+      console.error('Resend API error:', resendRes.status, errText);
+      await env.DB.prepare('UPDATE password_resets SET used = 1 WHERE id = ?').bind(resetId).run();
+      return jsonResponse({ error: 'Failed to deliver reset email. Please try again in a moment.' }, 502);
+    }
+
+    return jsonResponse(genericSuccess);
+  }
+
+  // Reset Password (one-time code verification + PBKDF2 password update)
+  if (method === 'POST' && path === '/api/auth/reset-password') {
+    const body = await parseJsonBody<{
+      email?: string;
+      code?: string;
+      newPassword?: string;
+      confirmPassword?: string;
+    }>(req);
+    if (!body) return jsonResponse({ error: 'Invalid JSON payload' }, 400);
+
+    const email = (body.email || '').trim().toLowerCase();
+    const code = (body.code || '').trim();
+    const newPassword = body.newPassword || '';
+    const confirmPassword = body.confirmPassword;
+
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return jsonResponse({ error: 'Please enter a valid email address.' }, 400);
+    }
+    if (!/^\d{6}$/.test(code)) {
+      return jsonResponse({ error: 'Please enter the 6-digit security code from your email.' }, 400);
+    }
+    if (newPassword.length < 6 || newPassword.length > 128) {
+      return jsonResponse({ error: 'New password must be between 6 and 128 characters.' }, 400);
+    }
+    if (confirmPassword !== undefined && newPassword !== confirmPassword) {
+      return jsonResponse({ error: 'Passwords do not match.' }, 400);
+    }
+
+    const resetRow = await env.DB.prepare(
+      'SELECT * FROM password_resets WHERE email = ? AND used = 0 ORDER BY created_at DESC LIMIT 1'
+    )
+      .bind(email)
+      .first<{
+        id: string;
+        user_id: string;
+        email: string;
+        code_hash: string;
+        attempts: number;
+        used: number;
+        expires_at: string;
+      }>();
+
+    if (!resetRow) {
+      return jsonResponse({ error: 'Invalid or expired security code.' }, 400);
+    }
+
+    const expiryMs = Date.parse(resetRow.expires_at);
+    if (!Number.isFinite(expiryMs) || expiryMs <= Date.now()) {
+      await env.DB.prepare('UPDATE password_resets SET used = 1 WHERE id = ?').bind(resetRow.id).run();
+      return jsonResponse({ error: 'Security code has expired. Please request a new one.' }, 400);
+    }
+
+    if (resetRow.attempts >= 5) {
+      await env.DB.prepare('UPDATE password_resets SET used = 1 WHERE id = ?').bind(resetRow.id).run();
+      return jsonResponse({ error: 'Too many incorrect attempts. Please request a new security code.' }, 429);
+    }
+
+    const expectedHash = await sha256Hex(`${resetRow.id}:${code}`);
+    if (!safeEqual(expectedHash, resetRow.code_hash)) {
+      const nextAttempts = resetRow.attempts + 1;
+      await env.DB.prepare('UPDATE password_resets SET attempts = ?, used = ? WHERE id = ?')
+        .bind(nextAttempts, nextAttempts >= 5 ? 1 : 0, resetRow.id)
+        .run();
+      return jsonResponse({ error: 'Invalid or expired security code.' }, 400);
+    }
+
+    const user = await env.DB.prepare('SELECT id, is_blocked FROM users WHERE id = ?')
+      .bind(resetRow.user_id)
+      .first<{ id: string; is_blocked: number }>();
+    if (!user || user.is_blocked === 1) {
+      return jsonResponse({ error: 'Invalid or expired security code.' }, 400);
+    }
+
+    // Atomically consume the one-time code before updating password
+    const consumeRes = await env.DB.prepare('UPDATE password_resets SET used = 1 WHERE id = ? AND used = 0')
+      .bind(resetRow.id)
+      .run();
+    if ((consumeRes.meta?.changes ?? 0) === 0) {
+      return jsonResponse({ error: 'This security code has already been used.' }, 400);
+    }
+    await env.DB.prepare('UPDATE password_resets SET used = 1 WHERE user_id = ?').bind(user.id).run();
+
+    const newHash = await hashPassword(newPassword);
+    await env.DB.prepare('UPDATE users SET password_hash = ? WHERE id = ?').bind(newHash, user.id).run();
+
+    return jsonResponse({
+      ok: true,
+      message: 'Your password has been reset. You can now log in with your new password.',
+    });
   }
 
   // Current authenticated user + links
@@ -739,6 +984,7 @@ export async function handleApiRequest(req: Request, env: EnvBindings): Promise<
         theme: effectiveTheme,
         total_views: totalViews,
         is_pro: activePro,
+        pro_expires_at: activePro ? user.pro_expires_at : null,
         verified_tick: activePro,
         show_watermark: !activePro,
       },

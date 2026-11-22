@@ -282,7 +282,12 @@ export function formatNairaFromKobo(kobo: number): string {
   }).format(naira);
 }
 
-export function isProActive(isPro: number | boolean, expiresAt: string | null | undefined): boolean {
-  if (!isPro || !expiresAt) return false;
-  return new Date(expiresAt).getTime() > Date.now();
+export function isProActive(
+  isPro: number | boolean | string | null | undefined,
+  expiresAt: string | null | undefined
+): boolean {
+  const proEnabled = isPro === true || Number(isPro) === 1;
+  if (!proEnabled || !expiresAt) return false;
+  const expiryMs = Date.parse(expiresAt);
+  return Number.isFinite(expiryMs) && expiryMs > Date.now();
 }

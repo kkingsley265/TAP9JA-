@@ -56,6 +56,7 @@ export interface PublicBioResponse {
     theme: ThemeId;
     total_views: number;
     is_pro: boolean;
+    pro_expires_at?: string | null;
     verified_tick: boolean;
     show_watermark: boolean;
   };

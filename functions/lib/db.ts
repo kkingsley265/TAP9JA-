@@ -103,6 +103,17 @@ const SCHEMA_STATEMENTS = [
     amount_kobo INTEGER NOT NULL,
     paid_at TEXT NOT NULL
   )`,
+  `CREATE TABLE IF NOT EXISTS password_resets (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    email TEXT NOT NULL,
+    code_hash TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    used INTEGER NOT NULL DEFAULT 0,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_password_resets_email_time ON password_resets (email, created_at)`,
 ];
 
 let schemaInitialized = false;

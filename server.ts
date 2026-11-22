@@ -59,6 +59,9 @@ async function startServer() {
     ADMIN_EMAIL: process.env.ADMIN_EMAIL || '',
     ADMIN_PASSWORD: process.env.ADMIN_PASSWORD || '',
     PRO_PRICE: process.env.PRO_PRICE || '1000',
+    RESEND_API_KEY: process.env.RESEND_API_KEY || '',
+    RESEND_FROM_EMAIL: process.env.RESEND_FROM_EMAIL || 'nkemjika@tap9ja.com.ng',
+    APP_URL: process.env.APP_URL || '',
   };
 
   // Mount all /api/* routes through the shared Fetch-standard Cloudflare-compatible router

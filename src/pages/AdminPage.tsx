@@ -15,6 +15,7 @@ import {
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
 import { Link } from 'react-router-dom';
 import { BrandMark } from '../components/BrandMark';
+import { PasswordInput } from '../components/PasswordInput';
 import { apiFetch, getAdminToken, setAdminToken, type UserProfile } from '../lib/api';
 import { formatNairaFromKobo } from '../shared/platforms';
 
@@ -233,14 +234,17 @@ export default function AdminPage() {
               />
             </div>
             <div>
-              <label className="block text-xs font-semibold text-zinc-300 mb-1.5">Admin Password</label>
-              <input
-                type="password"
+              <label htmlFor="admin-password" className="block text-xs font-semibold text-zinc-300 mb-1.5">
+                Admin Password
+              </label>
+              <PasswordInput
+                id="admin-password"
+                variant="dark"
                 required
+                autoComplete="current-password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder="••••••••"
-                className="w-full h-11 px-4 rounded-2xl bg-zinc-950 border border-white/15 text-sm text-white focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
               />
             </div>
 

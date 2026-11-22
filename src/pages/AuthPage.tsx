@@ -2,6 +2,7 @@ import { ArrowRight, CheckCircle2, Loader2, XCircle } from 'lucide-react';
 import { useEffect, useState, type FormEvent } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { BrandMark } from '../components/BrandMark';
+import { PasswordInput } from '../components/PasswordInput';
 import { apiFetch, getUserToken, setUserToken, type UserProfile } from '../lib/api';
 
 interface AuthPageProps {
@@ -188,18 +189,27 @@ export default function AuthPage({ mode }: AuthPageProps) {
             </div>
 
             <div>
-              <label htmlFor="auth-password" className="block text-xs font-semibold text-slate-700 mb-1.5">
-                Password
-              </label>
-              <input
+              <div className="flex items-center justify-between gap-2 mb-1.5">
+                <label htmlFor="auth-password" className="block text-xs font-semibold text-slate-700">
+                  Password
+                </label>
+                {mode === 'login' && (
+                  <Link
+                    to="/forgot-password"
+                    className="text-xs font-semibold text-emerald-700 hover:text-emerald-800 hover:underline whitespace-nowrap"
+                  >
+                    Forgot password?
+                  </Link>
+                )}
+              </div>
+              <PasswordInput
                 id="auth-password"
-                type="password"
                 required
                 minLength={6}
+                autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder="At least 6 characters"
-                className="w-full h-11 px-4 rounded-2xl border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500"
               />
             </div>
 

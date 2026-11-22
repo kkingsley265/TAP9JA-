@@ -15,7 +15,7 @@ import { PlatformBadgeIcon, VerifiedBlueTick } from '../components/PlatformIcon'
 import { QrModal } from '../components/QrModal';
 import { TipModal } from '../components/TipModal';
 import { apiFetch, type PublicBioResponse } from '../lib/api';
-import { parseSpotifyEmbed, parseYouTubeEmbed, THEMES } from '../shared/platforms';
+import { isProActive, parseSpotifyEmbed, parseYouTubeEmbed, THEMES } from '../shared/platforms';
 
 export default function PublicBioPage() {
   const { username = '' } = useParams();
@@ -34,7 +34,7 @@ export default function PublicBioPage() {
     setError('');
     apiFetch<PublicBioResponse>(
       `/api/public/profile/${encodeURIComponent(username)}${isPreview ? '?preview=1' : ''}`,
-      { authMode: 'none' }
+      { authMode: 'none', cache: 'no-store' }
     )
       .then((res) => {
         setData(res);
@@ -127,9 +127,15 @@ export default function PublicBioPage() {
   const ytEmbed = parseYouTubeEmbed(profile.youtube_url);
   const spotifyEmbed = parseSpotifyEmbed(profile.spotify_url);
   const whatsappClean = (profile.whatsapp_number || '').replace(/[^0-9]/g, '');
+  const hasActivePro =
+    Boolean(profile.is_pro) &&
+    (profile.pro_expires_at
+      ? isProActive(profile.is_pro, profile.pro_expires_at)
+      : profile.show_watermark === false);
+  const showWatermark = !hasActivePro;
 
   return (
-    <div className={`min-h-screen ${theme.pageBg} py-8 px-4 flex flex-col items-center justify-between transition-colors`}>
+    <div className={`min-h-screen ${theme.pageBg} py-8 px-4 flex flex-col items-center transition-colors`}>
       <main className="w-full max-w-[460px] mx-auto">
         <div className={`rounded-3xl p-6 sm:p-7 ${theme.cardBg}`}>
           {/* Top Action Utility Row */}
@@ -256,13 +262,13 @@ export default function PublicBioPage() {
       </main>
 
       {/* Conditional Watermark: Shown ONLY for Free / Expired Pro */}
-      {profile.show_watermark && (
-        <footer className="mt-8 pb-2 text-center">
+      {showWatermark && (
+        <footer className="mt-6 pb-4 text-center w-full max-w-[460px] mx-auto">
           <Link
             to="/"
-            className={`inline-flex items-center gap-2 text-xs font-medium opacity-85 hover:opacity-100 transition-opacity ${theme.textPrimary}`}
+            className={`inline-block text-xs font-medium hover:underline underline-offset-4 transition-opacity ${theme.textMuted}`}
           >
-            <span>Made with TAP9JA.com — Create your own free link</span>
+            Made with TAP9JA.com - Create your own free link
           </Link>
         </footer>
       )}
