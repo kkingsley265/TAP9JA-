@@ -6,6 +6,7 @@ import {
   Download,
   Loader2,
   LogOut,
+  Megaphone,
   Search,
   ShieldCheck,
   Trash2,
@@ -19,7 +20,7 @@ import { PasswordInput } from '../components/PasswordInput';
 import { apiFetch, getAdminToken, setAdminToken, type UserProfile } from '../lib/api';
 import { formatNairaFromKobo } from '../shared/platforms';
 
-type AdminTab = 'stats' | 'users' | 'tips' | 'payouts' | 'pro';
+type AdminTab = 'stats' | 'users' | 'tips' | 'payouts' | 'pro' | 'ads';
 
 interface AdminOverview {
   stats: {
@@ -86,12 +87,26 @@ export default function AdminPage() {
   const [selectedPayoutIds, setSelectedPayoutIds] = useState<string[]>([]);
   const [markingPaid, setMarkingPaid] = useState(false);
 
+  // Ad Settings state (stored in DB; NEVER rendered/executed inside Admin Console)
+  const [adsEnabled, setAdsEnabled] = useState(false);
+  const [adCode, setAdCode] = useState('');
+  const [adUpdatedAt, setAdUpdatedAt] = useState<string | null>(null);
+  const [savingAds, setSavingAds] = useState(false);
+
   const loadOverview = useCallback(async () => {
     if (!getAdminToken()) return;
     setLoading(true);
     try {
-      const res = await apiFetch<AdminOverview>('/api/admin/overview', { authMode: 'admin' });
+      const [res, adRes] = await Promise.all([
+        apiFetch<AdminOverview>('/api/admin/overview', { authMode: 'admin' }),
+        apiFetch<{ adsEnabled: boolean; adCode: string; updatedAt: string | null }>('/api/admin/ad-settings', {
+          authMode: 'admin',
+        }),
+      ]);
       setData(res);
+      setAdsEnabled(adRes.adsEnabled);
+      setAdCode(adRes.adCode);
+      setAdUpdatedAt(adRes.updatedAt);
     } catch {
       setAdminToken(null);
       setToken(null);
@@ -154,6 +169,34 @@ export default function AdminPage() {
       await loadOverview();
     } finally {
       setMarkingPaid(false);
+    }
+  };
+
+  const handleSaveAdSettings = async (e: FormEvent) => {
+    e.preventDefault();
+    setSavingAds(true);
+    setMessage('');
+    try {
+      const res = await apiFetch<{ adsEnabled: boolean; adCode: string; updatedAt: string | null }>(
+        '/api/admin/ad-settings',
+        {
+          method: 'PUT',
+          authMode: 'admin',
+          body: JSON.stringify({ adsEnabled, adCode }),
+        }
+      );
+      setAdsEnabled(res.adsEnabled);
+      setAdCode(res.adCode);
+      setAdUpdatedAt(res.updatedAt);
+      setMessage(
+        res.adsEnabled
+          ? 'Free Plan Ads enabled and saved. Ads will run only on Free creator dashboards and Free link clicks.'
+          : 'Free Plan Ads disabled and settings saved.'
+      );
+    } catch (err) {
+      setMessage(err instanceof Error ? err.message : 'Failed to save ad settings.');
+    } finally {
+      setSavingAds(false);
     }
   };
 
@@ -302,6 +345,7 @@ export default function AdminPage() {
             { id: 'tips' as AdminTab, label: 'Tips', icon: CreditCard },
             { id: 'payouts' as AdminTab, label: `Payouts (${data?.payoutQueue.length ?? 0})`, icon: Wallet },
             { id: 'pro' as AdminTab, label: 'Pro Payments', icon: Crown },
+            { id: 'ads' as AdminTab, label: 'Ad Settings', icon: Megaphone },
           ].map((item) => {
             const Icon = item.icon;
             const active = tab === item.id;
@@ -664,6 +708,70 @@ export default function AdminPage() {
                   </table>
                 </div>
               </div>
+            )}
+
+            {/* TAB F: AD SETTINGS */}
+            {tab === 'ads' && (
+              <form onSubmit={handleSaveAdSettings} className="rounded-3xl bg-white border border-slate-200 p-6 sm:p-8 space-y-6">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-5 border-b border-slate-200">
+                  <div>
+                    <h2 className="text-lg font-display font-bold text-slate-950">Free Plan Ad Settings</h2>
+                    <p className="text-sm text-slate-600 mt-1">
+                      100% of ad revenue goes to admin. Active Pro users and their supporters see zero ads.
+                    </p>
+                  </div>
+
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={adsEnabled}
+                    onClick={() => setAdsEnabled((prev) => !prev)}
+                    className={`h-11 px-5 rounded-2xl text-xs font-bold inline-flex items-center gap-2 transition-colors shrink-0 ${
+                      adsEnabled
+                        ? 'bg-emerald-600 text-white hover:bg-emerald-700'
+                        : 'bg-slate-200 text-slate-700 hover:bg-slate-300'
+                    }`}
+                  >
+                    <span>{adsEnabled ? 'Free Plan Ads: ON' : 'Free Plan Ads: OFF'}</span>
+                  </button>
+                </div>
+
+                <div className="rounded-2xl bg-slate-50 border border-slate-200 p-4 text-xs text-slate-600 space-y-1.5">
+                  <p className="font-semibold text-slate-800">Where this ad code loads:</p>
+                  <p>• Free / Expired Pro public bio links: 5-second interstitial once every 30 minutes per visitor.</p>
+                  <p>• Free / Expired Pro creator dashboard: 6-second auto-closing break every 5 minutes.</p>
+                  <p>• Never loads on Landing, Login, Register, Forgot Password, Paystack Tip Jar, Admin, or Pro profiles.</p>
+                </div>
+
+                <div>
+                  <label htmlFor="admin-ad-code" className="block text-xs font-semibold text-slate-700 mb-2">
+                    Monetag or Google AdSense Snippet (HTML / Script)
+                  </label>
+                  <textarea
+                    id="admin-ad-code"
+                    rows={8}
+                    value={adCode}
+                    onChange={(e) => setAdCode(e.target.value)}
+                    placeholder="Paste your Monetag or Google AdSense banner/interstitial script tag here..."
+                    className="w-full rounded-2xl border border-slate-200 bg-slate-50 p-4 text-xs font-mono text-slate-900 focus:bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
+                  />
+                  <p className="text-[11px] text-slate-500 mt-1.5">
+                    Stored safely in the database and never executed inside the Admin Console.
+                    {adUpdatedAt ? ` Last updated: ${new Date(adUpdatedAt).toLocaleString('en-NG')}.` : ''}
+                  </p>
+                </div>
+
+                <div className="flex justify-end">
+                  <button
+                    type="submit"
+                    disabled={savingAds}
+                    className="h-11 px-7 rounded-2xl bg-gradient-to-r from-emerald-600 to-purple-700 text-white text-sm font-semibold hover:opacity-95 transition-opacity inline-flex items-center gap-2 disabled:opacity-60"
+                  >
+                    {savingAds && <Loader2 className="h-4 w-4 animate-spin" />}
+                    Save Ad Settings
+                  </button>
+                </div>
+              </form>
             )}
           </>
         ) : null}

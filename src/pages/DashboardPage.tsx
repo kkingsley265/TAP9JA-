@@ -17,12 +17,14 @@ import {
   Trash2,
   UserCog,
   Wallet,
+  Zap,
 } from 'lucide-react';
 import { useCallback, useEffect, useState, type DragEvent, type FormEvent } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { ClicksBarChart, ViewsLineChart } from '../components/AnalyticsCharts';
 import { Avatar } from '../components/Avatar';
 import { BrandMark } from '../components/BrandMark';
+import { FreePlanAdModal } from '../components/FreePlanAdModal';
 import { PlatformBadgeIcon, VerifiedBlueTick } from '../components/PlatformIcon';
 import { QrModal } from '../components/QrModal';
 import {
@@ -121,6 +123,10 @@ export default function DashboardPage() {
   const [requestingPayout, setRequestingPayout] = useState(false);
   const [upgradingPro, setUpgradingPro] = useState(false);
 
+  // Free Plan Dashboard Ad state (never runs for active Pro users)
+  const [adConfig, setAdConfig] = useState<{ adsEnabled: boolean; adCode: string } | null>(null);
+  const [dashAdOpen, setDashAdOpen] = useState(false);
+
   const showToast = (type: 'success' | 'error', text: string) => {
     setToast({ type, text });
     setTimeout(() => setToast(null), 4200);
@@ -177,6 +183,54 @@ export default function DashboardPage() {
         .catch(() => {});
     }
   }, [activeTab, user]);
+
+  useEffect(() => {
+    if (!user || user.is_pro) {
+      setAdConfig(null);
+      setDashAdOpen(false);
+      return;
+    }
+    let cancelled = false;
+    apiFetch<{ adsEnabled: boolean; adCode: string }>('/api/ads/config', {
+      authMode: 'none',
+      cache: 'no-store',
+    })
+      .then((res) => {
+        if (!cancelled) setAdConfig(res);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.id, user?.is_pro]);
+
+  useEffect(() => {
+    if (!user || user.is_pro || !adConfig?.adsEnabled) return;
+
+    const FIVE_MINUTES_MS = 5 * 60 * 1000;
+    const STORAGE_KEY = 'tap9ja_dash_ad_last';
+
+    const checkAndShow = () => {
+      try {
+        const raw = window.localStorage.getItem(STORAGE_KEY);
+        if (!raw) {
+          window.localStorage.setItem(STORAGE_KEY, String(Date.now()));
+          return;
+        }
+        const lastShown = Number(raw);
+        if (!Number.isFinite(lastShown) || Date.now() - lastShown >= FIVE_MINUTES_MS) {
+          window.localStorage.setItem(STORAGE_KEY, String(Date.now()));
+          setDashAdOpen(true);
+        }
+      } catch {
+        // fallback if storage unavailable
+      }
+    };
+
+    checkAndShow();
+    const interval = window.setInterval(checkAndShow, 15000);
+    return () => window.clearInterval(interval);
+  }, [user, adConfig]);
 
   const handleLogout = () => {
     setUserToken(null);
@@ -449,11 +503,19 @@ export default function DashboardPage() {
         </div>
 
         <div className="space-y-2 pt-4 border-t border-slate-200">
-          <div className="px-3 py-2 text-xs text-slate-500">
-            Plan:{' '}
-            <span className="font-semibold text-slate-900">
-              {user.is_pro ? `Pro (${proDaysLeft}d left)` : 'Free (5 links max)'}
-            </span>
+          <div className="px-3 py-2 text-xs text-slate-500 space-y-1">
+            <div>
+              Plan:{' '}
+              <span className="font-semibold text-slate-900">
+                {user.is_pro ? `Pro (${proDaysLeft}d left)` : 'Free (5 links max)'}
+              </span>
+            </div>
+            {user.is_pro && (
+              <div className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-700">
+                <Zap className="h-3 w-3 shrink-0" />
+                <span>Pro — Ad Free Support</span>
+              </div>
+            )}
           </div>
           <button
             type="button"
@@ -1270,6 +1332,20 @@ export default function DashboardPage() {
         username={user.username}
         displayName={user.name}
       />
+
+      {!user.is_pro && adConfig?.adsEnabled && (
+        <FreePlanAdModal
+          open={dashAdOpen}
+          mode="dashboard"
+          creatorUsername={user.username}
+          adCode={adConfig.adCode}
+          onAutoClose={() => setDashAdOpen(false)}
+          onUpgradeClick={() => {
+            setDashAdOpen(false);
+            setActiveTab('pro');
+          }}
+        />
+      )}
     </div>
   );
 }

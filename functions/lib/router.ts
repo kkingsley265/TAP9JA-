@@ -291,6 +291,22 @@ export async function handleApiRequest(req: Request, env: EnvBindings): Promise<
     });
   }
 
+  // Public Free-Plan Ad Config (read-only settings stored by admin; never exposes admin secrets)
+  if (method === 'GET' && path === '/api/ads/config') {
+    const enabledRow = await env.DB.prepare("SELECT value FROM app_settings WHERE key = 'ads_enabled'")
+      .first<{ value: string }>();
+    const adsEnabled = enabledRow?.value === '1' || enabledRow?.value === 'true';
+    if (!adsEnabled) {
+      return jsonResponse({ adsEnabled: false, adCode: '' });
+    }
+    const codeRow = await env.DB.prepare("SELECT value FROM app_settings WHERE key = 'ad_code'")
+      .first<{ value: string }>();
+    return jsonResponse({
+      adsEnabled: true,
+      adCode: codeRow?.value || '',
+    });
+  }
+
   // Live username availability check
   if (method === 'GET' && path === '/api/auth/check-username') {
     const raw = (url.searchParams.get('username') || '').trim().toLowerCase();
@@ -1325,6 +1341,51 @@ export async function handleApiRequest(req: Request, env: EnvBindings): Promise<
       }
 
       return jsonResponse({ processedCount, paidAt });
+    }
+
+    if (method === 'GET' && path === '/api/admin/ad-settings') {
+      const enabledRow = await env.DB.prepare("SELECT value, updated_at FROM app_settings WHERE key = 'ads_enabled'")
+        .first<{ value: string; updated_at: string }>();
+      const codeRow = await env.DB.prepare("SELECT value, updated_at FROM app_settings WHERE key = 'ad_code'")
+        .first<{ value: string; updated_at: string }>();
+
+      return jsonResponse({
+        adsEnabled: enabledRow?.value === '1' || enabledRow?.value === 'true',
+        adCode: codeRow?.value || '',
+        updatedAt: codeRow?.updated_at || enabledRow?.updated_at || null,
+      });
+    }
+
+    if (method === 'PUT' && path === '/api/admin/ad-settings') {
+      const body = await parseJsonBody<{ adsEnabled?: boolean; adCode?: string }>(req);
+      if (!body) return jsonResponse({ error: 'Invalid JSON payload' }, 400);
+
+      const adsEnabled = Boolean(body.adsEnabled);
+      const adCode = typeof body.adCode === 'string' ? body.adCode.trim() : '';
+      if (adCode.length > 25000) {
+        return jsonResponse({ error: 'Ad code snippet is too large (max 25,000 characters).' }, 400);
+      }
+
+      const nowIso = new Date().toISOString();
+      await env.DB.prepare(
+        `INSERT INTO app_settings (key, value, updated_at) VALUES ('ads_enabled', ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
+      )
+        .bind(adsEnabled ? '1' : '0', nowIso)
+        .run();
+
+      await env.DB.prepare(
+        `INSERT INTO app_settings (key, value, updated_at) VALUES ('ad_code', ?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`
+      )
+        .bind(adCode, nowIso)
+        .run();
+
+      return jsonResponse({
+        adsEnabled,
+        adCode,
+        updatedAt: nowIso,
+      });
     }
   }
 

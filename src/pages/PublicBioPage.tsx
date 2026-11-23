@@ -6,11 +6,13 @@ import {
   MessageCircle,
   QrCode,
   Share2,
+  Zap,
 } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type MouseEvent } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { Avatar } from '../components/Avatar';
 import { BrandMark } from '../components/BrandMark';
+import { FreePlanAdModal } from '../components/FreePlanAdModal';
 import { PlatformBadgeIcon, VerifiedBlueTick } from '../components/PlatformIcon';
 import { QrModal } from '../components/QrModal';
 import { TipModal } from '../components/TipModal';
@@ -28,10 +30,14 @@ export default function PublicBioPage() {
   const [qrOpen, setQrOpen] = useState(false);
   const [tipOpen, setTipOpen] = useState(false);
   const [copiedShare, setCopiedShare] = useState(false);
+  const [adConfig, setAdConfig] = useState<{ adsEnabled: boolean; adCode: string } | null>(null);
+  const [pendingLink, setPendingLink] = useState<{ id: string; title: string; url: string } | null>(null);
 
   useEffect(() => {
     setLoading(true);
     setError('');
+    setAdConfig(null);
+    setPendingLink(null);
     apiFetch<PublicBioResponse>(
       `/api/public/profile/${encodeURIComponent(username)}${isPreview ? '?preview=1' : ''}`,
       { authMode: 'none', cache: 'no-store' }
@@ -39,6 +45,19 @@ export default function PublicBioPage() {
       .then((res) => {
         setData(res);
         document.title = `${res.profile.name} (@${res.profile.username}) — TAP9JA`;
+        const activePro =
+          Boolean(res.profile.is_pro) &&
+          (res.profile.pro_expires_at
+            ? isProActive(res.profile.is_pro, res.profile.pro_expires_at)
+            : res.profile.show_watermark === false);
+        if (!activePro) {
+          apiFetch<{ adsEnabled: boolean; adCode: string }>('/api/ads/config', {
+            authMode: 'none',
+            cache: 'no-store',
+          })
+            .then(setAdConfig)
+            .catch(() => {});
+        }
       })
       .catch((err) => {
         setError(err instanceof Error ? err.message : 'Creator page not found.');
@@ -57,6 +76,49 @@ export default function PublicBioPage() {
     } catch {
       // ignore tracking failure
     }
+  };
+
+  const handleCreatorLinkAction = (
+    e: MouseEvent<HTMLAnchorElement>,
+    link: { id: string; title: string; url: string },
+    hasActivePro: boolean,
+    creatorUsername: string
+  ) => {
+    if (hasActivePro || !adConfig?.adsEnabled) {
+      handleLinkClick(link.id);
+      return;
+    }
+
+    const storageKey = `tap9ja_ad_seen_${creatorUsername.toLowerCase()}`;
+    let withinCooldown = false;
+    try {
+      const lastSeen = Number(window.localStorage.getItem(storageKey) || 0);
+      if (Number.isFinite(lastSeen) && lastSeen > 0 && Date.now() - lastSeen < 30 * 60 * 1000) {
+        withinCooldown = true;
+      }
+    } catch {
+      withinCooldown = false;
+    }
+
+    if (withinCooldown) {
+      handleLinkClick(link.id);
+      return;
+    }
+
+    e.preventDefault();
+    setPendingLink({ id: link.id, title: link.title, url: link.url });
+  };
+
+  const handleContinueAfterAd = () => {
+    if (!pendingLink || !data) return;
+    const storageKey = `tap9ja_ad_seen_${data.profile.username.toLowerCase()}`;
+    try {
+      window.localStorage.setItem(storageKey, String(Date.now()));
+    } catch {
+      // ignore storage errors
+    }
+    handleLinkClick(pendingLink.id);
+    setPendingLink(null);
   };
 
   const handleShare = async () => {
@@ -176,6 +238,12 @@ export default function PublicBioPage() {
               {profile.verified_tick && <VerifiedBlueTick className="h-5 w-5" />}
             </div>
             <p className={`text-xs font-mono-nums mt-0.5 ${theme.textMuted}`}>@{profile.username}</p>
+            {hasActivePro && (
+              <div className="mt-2 inline-flex items-center gap-1 rounded-xl bg-emerald-500/15 border border-emerald-500/30 px-2.5 py-1 text-[11px] font-semibold text-emerald-500">
+                <Zap className="h-3 w-3 shrink-0" />
+                <span>Pro — Ad Free Support</span>
+              </div>
+            )}
             {profile.bio && (
               <p className={`text-sm mt-3 leading-relaxed max-w-sm ${theme.textPrimary} opacity-90`}>{profile.bio}</p>
             )}
@@ -248,7 +316,7 @@ export default function PublicBioPage() {
                   href={link.url}
                   target="_blank"
                   rel="noopener noreferrer"
-                  onClick={() => handleLinkClick(link.id)}
+                  onClick={(e) => handleCreatorLinkAction(e, link, hasActivePro, profile.username)}
                   className={`group flex items-center gap-3.5 p-3 rounded-2xl transition-all hover:scale-[1.01] active:scale-[0.99] ${theme.linkBg}`}
                 >
                   <PlatformBadgeIcon platform={link.platform} />
@@ -285,6 +353,17 @@ export default function PublicBioPage() {
         username={profile.username}
         creatorName={profile.name}
       />
+      {!hasActivePro && adConfig?.adsEnabled && (
+        <FreePlanAdModal
+          open={Boolean(pendingLink)}
+          mode="supporter"
+          creatorUsername={profile.username}
+          adCode={adConfig.adCode}
+          targetLinkTitle={pendingLink?.title}
+          targetUrl={pendingLink?.url}
+          onContinue={handleContinueAfterAd}
+        />
+      )}
     </div>
   );
 }
