@@ -14,6 +14,7 @@ import {
   signJwt,
   verifyJwt,
   verifyPassword,
+  verifyPaystackWebhookSignature,
 } from './crypto.ts';
 import { ensureSchema, type D1DatabaseLike } from './db.ts';
 
@@ -235,10 +236,11 @@ async function verifyPaystackTransaction(
     method: 'GET',
     headers: {
       Authorization: `Bearer ${secretKey}`,
+      Accept: 'application/json',
       'Content-Type': 'application/json',
     },
   });
-  const payload = (await res.json()) as {
+  const payload = (await res.json().catch(() => ({}))) as {
     status?: boolean;
     message?: string;
     data?: {
@@ -266,6 +268,186 @@ async function verifyPaystackTransaction(
   };
 }
 
+function getPaystackKeyMode(key: string): 'live' | 'test' | null {
+  if (key.startsWith('pk_live_') || key.startsWith('sk_live_')) return 'live';
+  if (key.startsWith('pk_test_') || key.startsWith('sk_test_')) return 'test';
+  return null;
+}
+
+async function recordVerifiedTip(
+  db: D1DatabaseLike,
+  params: {
+    creator: UserRow;
+    reference: string;
+    amountKobo: number;
+    fromName: string;
+    fromEmail: string;
+    message: string;
+  }
+): Promise<{
+  status: 'credited' | 'already_credited' | 'conflict';
+  amountKobo: number;
+  commissionKobo: number;
+  netKobo: number;
+}> {
+  const existingTip = await db
+    .prepare('SELECT to_user_id, amount_kobo, commission_kobo, net_kobo FROM tips WHERE paystack_reference = ?')
+    .bind(params.reference)
+    .first<{ to_user_id: string; amount_kobo: number; commission_kobo: number; net_kobo: number }>();
+
+  if (existingTip) {
+    if (existingTip.to_user_id === params.creator.id) {
+      return {
+        status: 'already_credited',
+        amountKobo: Number(existingTip.amount_kobo),
+        commissionKobo: Number(existingTip.commission_kobo),
+        netKobo: Number(existingTip.net_kobo),
+      };
+    }
+    return { status: 'conflict', amountKobo: 0, commissionKobo: 0, netKobo: 0 };
+  }
+
+  const existingPro = await db
+    .prepare('SELECT id FROM pro_payments WHERE paystack_reference = ?')
+    .bind(params.reference)
+    .first();
+  if (existingPro) {
+    return { status: 'conflict', amountKobo: 0, commissionKobo: 0, netKobo: 0 };
+  }
+
+  const amountKobo = Math.round(params.amountKobo);
+  const commissionKobo = Math.round(amountKobo * 0.1);
+  const netKobo = amountKobo - commissionKobo;
+  const now = new Date().toISOString();
+
+  const insertRes = await db
+    .prepare(
+      `INSERT OR IGNORE INTO tips (
+        id, to_user_id, to_username, from_name, from_email, message,
+        amount_kobo, commission_kobo, net_kobo, paystack_reference, status, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'success', ?)`
+    )
+    .bind(
+      generateId(),
+      params.creator.id,
+      params.creator.username,
+      params.fromName,
+      params.fromEmail,
+      params.message,
+      amountKobo,
+      commissionKobo,
+      netKobo,
+      params.reference,
+      now
+    )
+    .run();
+
+  if ((insertRes.meta?.changes ?? 0) === 0) {
+    const raced = await db
+      .prepare('SELECT to_user_id, amount_kobo, commission_kobo, net_kobo FROM tips WHERE paystack_reference = ?')
+      .bind(params.reference)
+      .first<{ to_user_id: string; amount_kobo: number; commission_kobo: number; net_kobo: number }>();
+    if (raced && raced.to_user_id === params.creator.id) {
+      return {
+        status: 'already_credited',
+        amountKobo: Number(raced.amount_kobo),
+        commissionKobo: Number(raced.commission_kobo),
+        netKobo: Number(raced.net_kobo),
+      };
+    }
+    return { status: 'conflict', amountKobo: 0, commissionKobo: 0, netKobo: 0 };
+  }
+
+  await db
+    .prepare(
+      `UPDATE users SET
+        pending_balance_kobo = pending_balance_kobo + ?,
+        total_earnings_kobo = total_earnings_kobo + ?
+       WHERE id = ?`
+    )
+    .bind(netKobo, netKobo, params.creator.id)
+    .run();
+
+  return { status: 'credited', amountKobo, commissionKobo, netKobo };
+}
+
+async function recordVerifiedPro(
+  db: D1DatabaseLike,
+  params: {
+    user: UserRow;
+    reference: string;
+    amountKobo: number;
+  }
+): Promise<{
+  status: 'credited' | 'already_credited' | 'conflict';
+  expiresAt: string;
+  user: UserRow | null;
+}> {
+  const existingPro = await db
+    .prepare('SELECT user_id, expires_at FROM pro_payments WHERE paystack_reference = ?')
+    .bind(params.reference)
+    .first<{ user_id: string; expires_at: string }>();
+
+  if (existingPro) {
+    if (existingPro.user_id === params.user.id) {
+      const freshUser = await db.prepare('SELECT * FROM users WHERE id = ?').bind(params.user.id).first<UserRow>();
+      return { status: 'already_credited', expiresAt: existingPro.expires_at, user: freshUser };
+    }
+    return { status: 'conflict', expiresAt: '', user: null };
+  }
+
+  const existingTip = await db
+    .prepare('SELECT id FROM tips WHERE paystack_reference = ?')
+    .bind(params.reference)
+    .first();
+  if (existingTip) {
+    return { status: 'conflict', expiresAt: '', user: null };
+  }
+
+  const nowMs = Date.now();
+  const existingExpiryMs = params.user.pro_expires_at ? new Date(params.user.pro_expires_at).getTime() : 0;
+  const baseMs =
+    isProActive(params.user.is_pro, params.user.pro_expires_at) && existingExpiryMs > nowMs ? existingExpiryMs : nowMs;
+  const newExpiry = new Date(baseMs + 30 * 24 * 60 * 60 * 1000).toISOString();
+  const nowIso = new Date(nowMs).toISOString();
+
+  const insertRes = await db
+    .prepare(
+      `INSERT OR IGNORE INTO pro_payments (id, user_id, username, amount_kobo, paystack_reference, expires_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    )
+    .bind(
+      generateId(),
+      params.user.id,
+      params.user.username,
+      Math.round(params.amountKobo),
+      params.reference,
+      newExpiry,
+      nowIso
+    )
+    .run();
+
+  if ((insertRes.meta?.changes ?? 0) === 0) {
+    const raced = await db
+      .prepare('SELECT user_id, expires_at FROM pro_payments WHERE paystack_reference = ?')
+      .bind(params.reference)
+      .first<{ user_id: string; expires_at: string }>();
+    if (raced && raced.user_id === params.user.id) {
+      const freshUser = await db.prepare('SELECT * FROM users WHERE id = ?').bind(params.user.id).first<UserRow>();
+      return { status: 'already_credited', expiresAt: raced.expires_at, user: freshUser };
+    }
+    return { status: 'conflict', expiresAt: '', user: null };
+  }
+
+  await db
+    .prepare('UPDATE users SET is_pro = 1, pro_expires_at = ? WHERE id = ?')
+    .bind(newExpiry, params.user.id)
+    .run();
+
+  const updated = await db.prepare('SELECT * FROM users WHERE id = ?').bind(params.user.id).first<UserRow>();
+  return { status: 'credited', expiresAt: newExpiry, user: updated };
+}
+
 export async function handleApiRequest(req: Request, env: EnvBindings): Promise<Response> {
   try {
     await ensureSchema(env.DB);
@@ -282,10 +464,16 @@ export async function handleApiRequest(req: Request, env: EnvBindings): Promise<
   // Public runtime config (exposes ONLY Paystack public key, never secret keys)
   if (method === 'GET' && path === '/api/config') {
     const publicKey = (env.PAYSTACK_PUBLIC_KEY || '').trim();
-    const hasSecret = Boolean((env.PAYSTACK_SECRET_KEY || '').trim());
+    const secretKey = (env.PAYSTACK_SECRET_KEY || '').trim();
+    const hasSecret = Boolean(secretKey);
+    const pkMode = getPaystackKeyMode(publicKey);
+    const skMode = getPaystackKeyMode(secretKey);
+    const paystackKeyMismatch = Boolean(pkMode && skMode && pkMode !== skMode);
     return jsonResponse({
       paystackPublicKey: publicKey,
-      paystackConfigured: Boolean(publicKey && hasSecret),
+      paystackConfigured: Boolean(publicKey && hasSecret && !paystackKeyMismatch),
+      paystackMode: pkMode || 'unknown',
+      paystackKeyMismatch,
       proPriceNgn,
       proPriceKobo: proPriceNgn * 100,
     });
@@ -1029,8 +1217,19 @@ export async function handleApiRequest(req: Request, env: EnvBindings): Promise<
   // Verify Paystack Tip (Server-Side Anti-Scam Verification)
   if (method === 'POST' && path === '/api/payments/verify-tip') {
     const secretKey = (env.PAYSTACK_SECRET_KEY || '').trim();
+    const publicKey = (env.PAYSTACK_PUBLIC_KEY || '').trim();
     if (!secretKey) {
       return jsonResponse({ error: 'Paystack secret key is not configured on the server.' }, 500);
+    }
+    const pkMode = getPaystackKeyMode(publicKey);
+    const skMode = getPaystackKeyMode(secretKey);
+    if (pkMode && skMode && pkMode !== skMode) {
+      return jsonResponse(
+        {
+          error: `Paystack key mismatch: Public Key is ${pkMode.toUpperCase()} while Secret Key is ${skMode.toUpperCase()}. Update both keys in Cloudflare Environment Variables.`,
+        },
+        500
+      );
     }
 
     const body = await parseJsonBody<{
@@ -1055,12 +1254,30 @@ export async function handleApiRequest(req: Request, env: EnvBindings): Promise<
       return jsonResponse({ error: 'Creator account not found.' }, 404);
     }
 
-    // Prevent double-spending / replay attacks
-    const dupTip = await env.DB.prepare('SELECT id FROM tips WHERE paystack_reference = ?').bind(reference).first();
+    const existingTip = await env.DB.prepare(
+      'SELECT to_user_id, amount_kobo, commission_kobo, net_kobo FROM tips WHERE paystack_reference = ?'
+    )
+      .bind(reference)
+      .first<{ to_user_id: string; amount_kobo: number; commission_kobo: number; net_kobo: number }>();
+
+    if (existingTip) {
+      if (existingTip.to_user_id === creator.id) {
+        return jsonResponse({
+          verified: true,
+          amountKobo: Number(existingTip.amount_kobo),
+          commissionKobo: Number(existingTip.commission_kobo),
+          netKobo: Number(existingTip.net_kobo),
+          reference,
+          alreadyRecorded: true,
+        });
+      }
+      return jsonResponse({ error: 'This payment reference has already been processed.' }, 409);
+    }
+
     const dupPro = await env.DB.prepare('SELECT id FROM pro_payments WHERE paystack_reference = ?')
       .bind(reference)
       .first();
-    if (dupTip || dupPro) {
+    if (dupPro) {
       return jsonResponse({ error: 'This payment reference has already been processed.' }, 409);
     }
 
@@ -1072,47 +1289,26 @@ export async function handleApiRequest(req: Request, env: EnvBindings): Promise<
       );
     }
 
-    const amountKobo = verification.amountKobo;
-    const commissionKobo = Math.round(amountKobo * 0.1);
-    const netKobo = amountKobo - commissionKobo;
-    const now = new Date().toISOString();
+    const result = await recordVerifiedTip(env.DB, {
+      creator,
+      reference,
+      amountKobo: verification.amountKobo,
+      fromName,
+      fromEmail,
+      message,
+    });
 
-    await env.DB.prepare(
-      `INSERT INTO tips (
-        id, to_user_id, to_username, from_name, from_email, message,
-        amount_kobo, commission_kobo, net_kobo, paystack_reference, status, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'success', ?)`
-    )
-      .bind(
-        generateId(),
-        creator.id,
-        creator.username,
-        fromName,
-        fromEmail,
-        message,
-        amountKobo,
-        commissionKobo,
-        netKobo,
-        reference,
-        now
-      )
-      .run();
-
-    await env.DB.prepare(
-      `UPDATE users SET
-        pending_balance_kobo = pending_balance_kobo + ?,
-        total_earnings_kobo = total_earnings_kobo + ?
-       WHERE id = ?`
-    )
-      .bind(netKobo, netKobo, creator.id)
-      .run();
+    if (result.status === 'conflict') {
+      return jsonResponse({ error: 'This payment reference has already been processed.' }, 409);
+    }
 
     return jsonResponse({
       verified: true,
-      amountKobo,
-      commissionKobo,
-      netKobo,
+      amountKobo: result.amountKobo,
+      commissionKobo: result.commissionKobo,
+      netKobo: result.netKobo,
       reference,
+      alreadyRecorded: result.status === 'already_credited',
     });
   }
 
@@ -1122,19 +1318,42 @@ export async function handleApiRequest(req: Request, env: EnvBindings): Promise<
     if (!user) return jsonResponse({ error: 'Unauthorized' }, 401);
 
     const secretKey = (env.PAYSTACK_SECRET_KEY || '').trim();
+    const publicKey = (env.PAYSTACK_PUBLIC_KEY || '').trim();
     if (!secretKey) {
       return jsonResponse({ error: 'Paystack secret key is not configured on the server.' }, 500);
+    }
+    const pkMode = getPaystackKeyMode(publicKey);
+    const skMode = getPaystackKeyMode(secretKey);
+    if (pkMode && skMode && pkMode !== skMode) {
+      return jsonResponse(
+        {
+          error: `Paystack key mismatch: Public Key is ${pkMode.toUpperCase()} while Secret Key is ${skMode.toUpperCase()}. Update both keys in Cloudflare Environment Variables.`,
+        },
+        500
+      );
     }
 
     const body = await parseJsonBody<{ reference?: string }>(req);
     const reference = (body?.reference || '').trim();
     if (!reference) return jsonResponse({ error: 'Payment reference is required.' }, 400);
 
-    const dupPro = await env.DB.prepare('SELECT id FROM pro_payments WHERE paystack_reference = ?')
+    const existingPro = await env.DB.prepare('SELECT user_id, expires_at FROM pro_payments WHERE paystack_reference = ?')
       .bind(reference)
-      .first();
+      .first<{ user_id: string; expires_at: string }>();
+    if (existingPro) {
+      if (existingPro.user_id === user.id) {
+        return jsonResponse({
+          verified: true,
+          user: sanitizeUser(user),
+          pro_expires_at: existingPro.expires_at,
+          alreadyRecorded: true,
+        });
+      }
+      return jsonResponse({ error: 'This payment reference has already been processed.' }, 409);
+    }
+
     const dupTip = await env.DB.prepare('SELECT id FROM tips WHERE paystack_reference = ?').bind(reference).first();
-    if (dupPro || dupTip) {
+    if (dupTip) {
       return jsonResponse({ error: 'This payment reference has already been processed.' }, 409);
     }
 
@@ -1147,29 +1366,117 @@ export async function handleApiRequest(req: Request, env: EnvBindings): Promise<
       );
     }
 
-    const nowMs = Date.now();
-    const existingExpiryMs = user.pro_expires_at ? new Date(user.pro_expires_at).getTime() : 0;
-    const baseMs = isProActive(user.is_pro, user.pro_expires_at) && existingExpiryMs > nowMs ? existingExpiryMs : nowMs;
-    const newExpiry = new Date(baseMs + 30 * 24 * 60 * 60 * 1000).toISOString();
-    const nowIso = new Date(nowMs).toISOString();
+    const result = await recordVerifiedPro(env.DB, {
+      user,
+      reference,
+      amountKobo: verification.amountKobo,
+    });
+    if (result.status === 'conflict') {
+      return jsonResponse({ error: 'This payment reference has already been processed.' }, 409);
+    }
 
-    await env.DB.prepare(
-      `INSERT INTO pro_payments (id, user_id, username, amount_kobo, paystack_reference, expires_at, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
-    )
-      .bind(generateId(), user.id, user.username, verification.amountKobo, reference, newExpiry, nowIso)
-      .run();
-
-    await env.DB.prepare('UPDATE users SET is_pro = 1, pro_expires_at = ? WHERE id = ?')
-      .bind(newExpiry, user.id)
-      .run();
-
-    const updated = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(user.id).first<UserRow>();
     return jsonResponse({
       verified: true,
-      user: updated ? sanitizeUser(updated) : null,
-      pro_expires_at: newExpiry,
+      user: result.user ? sanitizeUser(result.user) : null,
+      pro_expires_at: result.expiresAt,
+      alreadyRecorded: result.status === 'already_credited',
     });
+  }
+
+  // Paystack Webhook (Server-to-Server backup & bank-transfer / mobile fallback)
+  if (method === 'POST' && path === '/api/payments/webhook') {
+    const secretKey = (env.PAYSTACK_SECRET_KEY || '').trim();
+    if (!secretKey) {
+      return jsonResponse({ error: 'Paystack secret key is not configured.' }, 500);
+    }
+
+    const rawBody = await req.text();
+    const signature = req.headers.get('x-paystack-signature') || '';
+    const validSig = await verifyPaystackWebhookSignature(rawBody, signature, secretKey);
+    if (!validSig) {
+      return jsonResponse({ error: 'Invalid Paystack webhook signature.' }, 401);
+    }
+
+    let eventPayload: {
+      event?: string;
+      data?: {
+        status?: string;
+        reference?: string;
+        amount?: number;
+        currency?: string;
+        customer?: { email?: string };
+        metadata?: unknown;
+      };
+    } | null = null;
+    try {
+      eventPayload = JSON.parse(rawBody);
+    } catch {
+      return jsonResponse({ error: 'Invalid JSON webhook body' }, 400);
+    }
+
+    if (eventPayload?.event !== 'charge.success' || eventPayload.data?.status !== 'success') {
+      return jsonResponse({ received: true, ignored: true });
+    }
+
+    const tx = eventPayload.data;
+    const reference = (tx.reference || '').trim();
+    const amountKobo = Number(tx.amount || 0);
+    if (!reference || amountKobo <= 0 || (tx.currency && tx.currency !== 'NGN')) {
+      return jsonResponse({ received: true, ignored: true });
+    }
+
+    let meta: Record<string, unknown> = {};
+    if (typeof tx.metadata === 'string') {
+      try {
+        meta = JSON.parse(tx.metadata) as Record<string, unknown>;
+      } catch {
+        meta = {};
+      }
+    } else if (tx.metadata && typeof tx.metadata === 'object') {
+      meta = tx.metadata as Record<string, unknown>;
+    }
+
+    const metaType = String(meta.type || '').trim();
+
+    if (metaType === 'tip' && amountKobo >= 10000) {
+      const toUsername = String(meta.to_username || '').trim().toLowerCase();
+      if (toUsername) {
+        const creator = await env.DB.prepare('SELECT * FROM users WHERE username = ?')
+          .bind(toUsername)
+          .first<UserRow>();
+        if (creator && creator.is_blocked !== 1) {
+          const fromName = String(meta.from_name || 'Anonymous Supporter').trim().slice(0, 80) || 'Anonymous Supporter';
+          const fromEmail = String(meta.from_email || tx.customer?.email || '').trim().slice(0, 120);
+          const message = String(meta.message || '').trim().slice(0, 240);
+          await recordVerifiedTip(env.DB, {
+            creator,
+            reference,
+            amountKobo,
+            fromName,
+            fromEmail,
+            message,
+          });
+        }
+      }
+    } else if (metaType === 'pro_subscription' && amountKobo >= proPriceNgn * 100) {
+      const userId = String(meta.user_id || '').trim();
+      const username = String(meta.username || '').trim().toLowerCase();
+      let targetUser: UserRow | null = null;
+      if (userId) {
+        targetUser = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(userId).first<UserRow>();
+      } else if (username) {
+        targetUser = await env.DB.prepare('SELECT * FROM users WHERE username = ?').bind(username).first<UserRow>();
+      }
+      if (targetUser && targetUser.is_blocked !== 1) {
+        await recordVerifiedPro(env.DB, {
+          user: targetUser,
+          reference,
+          amountKobo,
+        });
+      }
+    }
+
+    return jsonResponse({ received: true });
   }
 
   // Admin Login

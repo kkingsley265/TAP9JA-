@@ -3,6 +3,8 @@ import type { PlatformId, ThemeId } from '../shared/platforms';
 export interface PublicConfig {
   paystackPublicKey: string;
   paystackConfigured: boolean;
+  paystackMode?: 'live' | 'test' | 'unknown';
+  paystackKeyMismatch?: boolean;
   proPriceNgn: number;
   proPriceKobo: number;
 }
@@ -108,7 +110,7 @@ export async function apiFetch<T>(
     if (t) reqHeaders.set('Authorization', `Bearer ${t}`);
   }
 
-  const res = await fetch(path, { ...rest, headers: reqHeaders });
+  const res = await fetch(path, { cache: 'no-store', ...rest, headers: reqHeaders });
   const data = (await res.json().catch(() => ({}))) as T & { error?: string; code?: string };
   if (!res.ok) {
     const err = new Error(data.error || `Request failed (${res.status})`) as Error & {
@@ -145,7 +147,7 @@ export function openPaystackPopup(params: {
   amountKobo: number;
   metadata?: Record<string, unknown>;
   onSuccess: (reference: string) => void;
-  onCancel?: () => void;
+  onCancel?: (reference: string) => void;
   onError: (msg: string) => void;
 }) {
   if (!params.publicKey) {
@@ -171,7 +173,7 @@ export function openPaystackPopup(params: {
       params.onSuccess(response.reference || reference);
     },
     onClose: () => {
-      params.onCancel?.();
+      params.onCancel?.(reference);
     },
   });
   handler.openIframe();

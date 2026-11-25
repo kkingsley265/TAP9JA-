@@ -48,12 +48,21 @@ export function TipModal({ open, onClose, username, creatorName }: TipModalProps
       setError('Please enter a valid email address for your Paystack receipt.');
       return;
     }
+    if (config?.paystackKeyMismatch) {
+      setError(
+        'Paystack key mismatch: Public Key and Secret Key must both be LIVE (or both TEST) in Cloudflare Environment Variables.'
+      );
+      return;
+    }
     if (!config?.paystackConfigured || !config.paystackPublicKey) {
       setError(
         'Paystack payments are not configured yet. The site owner needs to add PAYSTACK_PUBLIC_KEY and PAYSTACK_SECRET_KEY in environment variables.'
       );
       return;
     }
+
+    const safeFromName = fromName.trim() || 'Anonymous Supporter';
+    const safeMessage = message.trim();
 
     setSubmitting(true);
     openPaystackPopup({
@@ -63,7 +72,9 @@ export function TipModal({ open, onClose, username, creatorName }: TipModalProps
       metadata: {
         type: 'tip',
         to_username: username,
-        from_name: fromName.trim() || 'Anonymous Supporter',
+        from_name: safeFromName,
+        from_email: email,
+        message: safeMessage,
       },
       onSuccess: async (reference) => {
         try {
@@ -75,9 +86,9 @@ export function TipModal({ open, onClose, username, creatorName }: TipModalProps
               body: JSON.stringify({
                 reference,
                 username,
-                fromName: fromName.trim() || 'Anonymous Supporter',
+                fromName: safeFromName,
                 fromEmail: email,
-                message: message.trim(),
+                message: safeMessage,
               }),
             }
           );
@@ -91,8 +102,33 @@ export function TipModal({ open, onClose, username, creatorName }: TipModalProps
           setSubmitting(false);
         }
       },
-      onCancel: () => {
-        setSubmitting(false);
+      onCancel: async (reference) => {
+        try {
+          const verified = await apiFetch<{ verified: boolean; amountKobo: number; reference: string }>(
+            '/api/payments/verify-tip',
+            {
+              method: 'POST',
+              authMode: 'none',
+              body: JSON.stringify({
+                reference,
+                username,
+                fromName: safeFromName,
+                fromEmail: email,
+                message: safeMessage,
+              }),
+            }
+          );
+          if (verified.verified) {
+            setSuccessInfo({
+              amountNgn: verified.amountKobo / 100,
+              reference: verified.reference,
+            });
+          }
+        } catch {
+          // User closed popup without completing payment
+        } finally {
+          setSubmitting(false);
+        }
       },
       onError: (msg) => {
         setSubmitting(false);

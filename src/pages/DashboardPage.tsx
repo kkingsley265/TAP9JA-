@@ -396,6 +396,13 @@ export default function DashboardPage() {
   // Upgrade to Pro (₦1,000 / 30 days)
   const handleUpgradePro = () => {
     if (!user) return;
+    if (config?.paystackKeyMismatch) {
+      showToast(
+        'error',
+        'Paystack key mismatch: Public Key and Secret Key must both be LIVE (or both TEST) in Cloudflare Environment Variables.'
+      );
+      return;
+    }
     if (!config?.paystackConfigured || !config.paystackPublicKey) {
       showToast(
         'error',
@@ -429,7 +436,23 @@ export default function DashboardPage() {
           setUpgradingPro(false);
         }
       },
-      onCancel: () => setUpgradingPro(false),
+      onCancel: async (reference) => {
+        try {
+          const res = await apiFetch<{ verified: boolean; user: UserProfile }>('/api/payments/verify-pro', {
+            method: 'POST',
+            body: JSON.stringify({ reference }),
+          });
+          if (res.verified && res.user) {
+            setUser(res.user);
+            syncFormFromUser(res.user);
+            showToast('success', 'Welcome to TAP9JA Pro! Unlimited links & all themes unlocked for 30 days.');
+          }
+        } catch {
+          // Cancelled without completing payment
+        } finally {
+          setUpgradingPro(false);
+        }
+      },
       onError: (msg) => {
         setUpgradingPro(false);
         showToast('error', msg);

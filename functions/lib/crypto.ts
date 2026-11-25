@@ -48,6 +48,30 @@ export async function sha256Hex(value: string): Promise<string> {
   return bytesToHex(new Uint8Array(digest));
 }
 
+export async function verifyPaystackWebhookSignature(
+  rawBody: string,
+  signatureHeader: string,
+  secretKey: string
+): Promise<boolean> {
+  const sig = (signatureHeader || '').trim().toLowerCase();
+  if (!sig || !secretKey || !/^[0-9a-f]+$/.test(sig)) return false;
+  const key = await crypto.subtle.importKey(
+    'raw',
+    encoder.encode(secretKey),
+    { name: 'HMAC', hash: 'SHA-512' },
+    false,
+    ['sign']
+  );
+  const mac = await crypto.subtle.sign('HMAC', key, encoder.encode(rawBody));
+  const expected = bytesToHex(new Uint8Array(mac));
+  if (expected.length !== sig.length) return false;
+  let diff = 0;
+  for (let i = 0; i < expected.length; i++) {
+    diff |= expected.charCodeAt(i) ^ sig.charCodeAt(i);
+  }
+  return diff === 0;
+}
+
 export async function hashPassword(password: string): Promise<string> {
   const salt = crypto.getRandomValues(new Uint8Array(16));
   const keyMaterial = await crypto.subtle.importKey(
