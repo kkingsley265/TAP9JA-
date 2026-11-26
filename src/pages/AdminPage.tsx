@@ -7,8 +7,10 @@ import {
   Loader2,
   LogOut,
   Megaphone,
+  Palette,
   Search,
   ShieldCheck,
+  ShoppingBag,
   Trash2,
   Users,
   Wallet,
@@ -18,9 +20,9 @@ import { Link } from 'react-router-dom';
 import { BrandMark } from '../components/BrandMark';
 import { PasswordInput } from '../components/PasswordInput';
 import { apiFetch, getAdminToken, setAdminToken, type UserProfile } from '../lib/api';
-import { formatNairaFromKobo } from '../shared/platforms';
+import { formatNairaFromKobo, PRODUCT_TYPES, THEMES, type ProductType, type ThemeId } from '../shared/platforms';
 
-type AdminTab = 'stats' | 'users' | 'tips' | 'payouts' | 'pro' | 'ads';
+type AdminTab = 'stats' | 'users' | 'products' | 'tips' | 'payouts' | 'pro' | 'ads';
 
 interface AdminOverview {
   stats: {
@@ -55,6 +57,29 @@ interface AdminOverview {
     created_at: string;
   }>;
   payoutQueue: UserProfile[];
+  storeStats?: {
+    totalProducts: number;
+    activeProducts: number;
+    totalSales: number;
+    totalStoreRevenueKobo: number;
+    totalStoreCommissionKobo: number;
+    freeThemeUsers: number;
+    premiumThemeUsers: number;
+    themeCounts: Record<string, number>;
+  };
+  recentProductSales?: Array<{
+    id: string;
+    product_id: string;
+    product_title: string;
+    product_type: ProductType;
+    seller_username: string;
+    buyer_email_masked: string;
+    amount_kobo: number;
+    commission_kobo: number;
+    net_kobo: number;
+    paystack_reference: string;
+    created_at: string;
+  }>;
   payoutHistory: Array<{
     id: string;
     username: string;
@@ -342,6 +367,7 @@ export default function AdminPage() {
           {[
             { id: 'stats' as AdminTab, label: 'Overview Stats', icon: Users },
             { id: 'users' as AdminTab, label: 'Users', icon: Users },
+            { id: 'products' as AdminTab, label: 'Products & Themes', icon: ShoppingBag },
             { id: 'tips' as AdminTab, label: 'Tips', icon: CreditCard },
             { id: 'payouts' as AdminTab, label: `Payouts (${data?.payoutQueue.length ?? 0})`, icon: Wallet },
             { id: 'pro' as AdminTab, label: 'Pro Payments', icon: Crown },
@@ -486,6 +512,140 @@ export default function AdminPage() {
                       ))}
                     </tbody>
                   </table>
+                </div>
+              </div>
+            )}
+
+            {/* TAB B2: DIGITAL PRODUCTS & THEME STATS */}
+            {tab === 'products' && (
+              <div className="space-y-6">
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                  {[
+                    {
+                      label: 'Total Products',
+                      value: `${(data.storeStats?.totalProducts ?? 0).toLocaleString('en-NG')} (${data.storeStats?.activeProducts ?? 0} active)`,
+                    },
+                    {
+                      label: 'Total Store Sales',
+                      value: (data.storeStats?.totalSales ?? 0).toLocaleString('en-NG'),
+                    },
+                    {
+                      label: 'Total Store Revenue',
+                      value: formatNairaFromKobo(data.storeStats?.totalStoreRevenueKobo ?? 0),
+                    },
+                    {
+                      label: 'Platform Store Commission (10%)',
+                      value: formatNairaFromKobo(data.storeStats?.totalStoreCommissionKobo ?? 0),
+                    },
+                  ].map((kpi) => (
+                    <div key={kpi.label} className="rounded-3xl bg-white border border-slate-200 p-6">
+                      <p className="text-xs font-medium text-slate-500">{kpi.label}</p>
+                      <p className="text-2xl font-display font-extrabold font-mono-nums text-slate-950 mt-2">
+                        {kpi.value}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Theme Usage Breakdown */}
+                <div className="rounded-3xl bg-white border border-slate-200 p-6 space-y-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex items-center gap-2">
+                      <Palette className="h-5 w-5 text-purple-700" />
+                      <h2 className="text-base font-display font-bold text-slate-950">Theme Usage Stats</h2>
+                    </div>
+                    <div className="flex items-center gap-3 text-xs font-semibold">
+                      <span className="px-3 py-1 rounded-xl bg-slate-100 text-slate-700">
+                        Free Themes: {data.storeStats?.freeThemeUsers ?? 0}
+                      </span>
+                      <span className="px-3 py-1 rounded-xl bg-purple-100 text-purple-800">
+                        Premium Themes: {data.storeStats?.premiumThemeUsers ?? 0}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3">
+                    {(Object.values(THEMES) as Array<(typeof THEMES)[ThemeId]>).map((t) => {
+                      const count = data.storeStats?.themeCounts?.[t.id] ?? 0;
+                      return (
+                        <div key={t.id} className="rounded-2xl border border-slate-200 p-3 bg-slate-50">
+                          <p className="text-[10px] font-bold uppercase text-slate-500">{t.tag}</p>
+                          <p className="text-xs font-bold text-slate-900 truncate mt-0.5">{t.name}</p>
+                          <p className="text-lg font-display font-extrabold font-mono-nums text-slate-950 mt-1">
+                            {count}
+                          </p>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {/* Recent Product Sales (Masked Buyer Email & NO external product links) */}
+                <div className="rounded-3xl bg-white border border-slate-200 overflow-hidden">
+                  <div className="p-5 border-b border-slate-200 flex items-center justify-between">
+                    <div>
+                      <h2 className="text-base font-display font-bold text-slate-950">
+                        Recent Product Sales ({data.recentProductSales?.length ?? 0})
+                      </h2>
+                      <p className="text-xs text-slate-500">
+                        Buyer emails are privacy-masked and product delivery links are never shown in Admin.
+                      </p>
+                    </div>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-sm">
+                      <thead className="bg-slate-50 text-xs text-slate-500">
+                        <tr>
+                          <th className="px-5 py-3 font-semibold">Product</th>
+                          <th className="px-5 py-3 font-semibold">Seller</th>
+                          <th className="px-5 py-3 font-semibold">Buyer (Masked)</th>
+                          <th className="px-5 py-3 font-semibold text-right">Amount</th>
+                          <th className="px-5 py-3 font-semibold text-right">Fee (10%)</th>
+                          <th className="px-5 py-3 font-semibold text-right">Creator Net</th>
+                          <th className="px-5 py-3 font-semibold">Reference</th>
+                          <th className="px-5 py-3 font-semibold text-right">Date</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {!data.recentProductSales || data.recentProductSales.length === 0 ? (
+                          <tr>
+                            <td colSpan={8} className="px-5 py-8 text-center text-slate-500">
+                              No digital product sales recorded yet.
+                            </td>
+                          </tr>
+                        ) : (
+                          data.recentProductSales.map((sale) => (
+                            <tr key={sale.id} className="hover:bg-slate-50/70">
+                              <td className="px-5 py-3">
+                                <p className="font-semibold text-slate-900">{sale.product_title}</p>
+                                <p className="text-[11px] text-slate-500">
+                                  {PRODUCT_TYPES[sale.product_type]?.shortLabel || sale.product_type}
+                                </p>
+                              </td>
+                              <td className="px-5 py-3 font-semibold text-emerald-700">@{sale.seller_username}</td>
+                              <td className="px-5 py-3 font-mono-nums text-xs text-slate-600">
+                                {sale.buyer_email_masked}
+                              </td>
+                              <td className="px-5 py-3 text-right font-mono-nums">
+                                {formatNairaFromKobo(sale.amount_kobo)}
+                              </td>
+                              <td className="px-5 py-3 text-right font-mono-nums text-purple-700">
+                                {formatNairaFromKobo(sale.commission_kobo)}
+                              </td>
+                              <td className="px-5 py-3 text-right font-mono-nums font-semibold">
+                                {formatNairaFromKobo(sale.net_kobo)}
+                              </td>
+                              <td className="px-5 py-3 font-mono-nums text-xs text-slate-500">
+                                {sale.paystack_reference}
+                              </td>
+                              <td className="px-5 py-3 text-right font-mono-nums text-xs text-slate-500">
+                                {new Date(sale.created_at).toLocaleString('en-NG')}
+                              </td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
                 </div>
               </div>
             )}

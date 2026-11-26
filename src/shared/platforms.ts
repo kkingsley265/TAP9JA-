@@ -132,6 +132,10 @@ export function parseYouTubeEmbed(rawUrl: string): string | null {
         const id = parsed.pathname.split('/')[2];
         return id ? `https://www.youtube.com/embed/${id}` : null;
       }
+      if (parsed.pathname.startsWith('/live/')) {
+        const id = parsed.pathname.split('/')[2];
+        return id ? `https://www.youtube.com/embed/${id}` : null;
+      }
       const listId = parsed.searchParams.get('list');
       const vId = parsed.searchParams.get('v');
       if (vId) return `https://www.youtube.com/embed/${vId}`;
@@ -163,89 +167,316 @@ export function parseSpotifyEmbed(rawUrl: string): string | null {
   return null;
 }
 
-export type ThemeId = 'light' | 'dark' | 'naija_green' | 'purple_hustle' | 'sunset';
+export type ProductType = 'video' | 'audio' | 'file' | 'community';
+
+export interface ProductTypeMeta {
+  id: ProductType;
+  label: string;
+  shortLabel: string;
+  actionLabel: string;
+  placeholderUrl: string;
+}
+
+export const PRODUCT_TYPES: Record<ProductType, ProductTypeMeta> = {
+  video: {
+    id: 'video',
+    label: 'Video / Course (YouTube, Loom, Vimeo)',
+    shortLabel: 'Video',
+    actionLabel: 'Watch Video',
+    placeholderUrl: 'https://youtu.be/... or https://www.loom.com/share/...',
+  },
+  audio: {
+    id: 'audio',
+    label: 'Music / Audio (Spotify, SoundCloud, Drive)',
+    shortLabel: 'Audio',
+    actionLabel: 'Listen Now',
+    placeholderUrl: 'https://open.spotify.com/track/... or https://drive.google.com/...',
+  },
+  file: {
+    id: 'file',
+    label: 'File / Ebook / Template (Drive, Canva, Notion)',
+    shortLabel: 'File / Ebook',
+    actionLabel: 'Download / Open File',
+    placeholderUrl: 'https://drive.google.com/file/d/... or https://canva.com/...',
+  },
+  community: {
+    id: 'community',
+    label: 'Private Group / Coaching (Telegram, WhatsApp, Calendly)',
+    shortLabel: 'Group / Call',
+    actionLabel: 'Join / Book Access',
+    placeholderUrl: 'https://t.me/+... or https://chat.whatsapp.com/...',
+  },
+};
+
+export function parseProductEmbed(
+  productType: ProductType,
+  externalUrl: string
+): { embedType: 'iframe' | 'none'; embedUrl: string | null; height?: number } {
+  const url = (externalUrl || '').trim();
+  if (!url) return { embedType: 'none', embedUrl: null };
+
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.replace(/^www\./, '').toLowerCase();
+
+    if (productType === 'video') {
+      const yt = parseYouTubeEmbed(url);
+      if (yt) return { embedType: 'iframe', embedUrl: yt };
+
+      if (host === 'loom.com' || host.endsWith('.loom.com')) {
+        const parts = parsed.pathname.split('/').filter(Boolean);
+        if ((parts[0] === 'share' || parts[0] === 'embed') && parts[1]) {
+          return { embedType: 'iframe', embedUrl: `https://www.loom.com/embed/${parts[1]}` };
+        }
+      }
+
+      if (host === 'vimeo.com' || host === 'player.vimeo.com') {
+        const parts = parsed.pathname.split('/').filter(Boolean);
+        const videoId = host === 'player.vimeo.com' && parts[0] === 'video' ? parts[1] : parts[0];
+        if (videoId && /^\d+$/.test(videoId)) {
+          return { embedType: 'iframe', embedUrl: `https://player.vimeo.com/video/${videoId}` };
+        }
+      }
+
+      if (host === 'drive.google.com') {
+        const match = parsed.pathname.match(/\/file\/d\/([^/]+)/);
+        if (match?.[1]) {
+          return { embedType: 'iframe', embedUrl: `https://drive.google.com/file/d/${match[1]}/preview` };
+        }
+      }
+    }
+
+    if (productType === 'audio') {
+      const sp = parseSpotifyEmbed(url);
+      if (sp) return { embedType: 'iframe', embedUrl: sp, height: 152 };
+
+      if (host === 'soundcloud.com' || host === 'm.soundcloud.com') {
+        return {
+          embedType: 'iframe',
+          embedUrl: `https://w.soundcloud.com/player/?url=${encodeURIComponent(url)}&color=%23059669&auto_play=false&show_teaser=true`,
+          height: 166,
+        };
+      }
+
+      const yt = parseYouTubeEmbed(url);
+      if (yt) return { embedType: 'iframe', embedUrl: yt };
+    }
+  } catch {
+    return { embedType: 'none', embedUrl: null };
+  }
+
+  return { embedType: 'none', embedUrl: null };
+}
+
+export type ThemeId =
+  | 'free_theme_1'
+  | 'free_theme_2'
+  | 'selar_style'
+  | 'gumroad_style'
+  | 'shopify_neon'
+  | 'instagram_luxury'
+  | 'stripe_professional';
 
 export interface ThemeConfig {
   id: ThemeId;
   name: string;
+  tag: 'FREE' | 'PREMIUM';
   description: string;
   proOnly: boolean;
   previewGradient: string;
   pageBg: string;
   cardBg: string;
+  headerBanner?: string;
   linkBg: string;
+  productCardBg: string;
+  ctaBg: string;
   textPrimary: string;
   textMuted: string;
+  priceColor: string;
   badgeBg: string;
+  avatarRing: string;
 }
 
 export const THEMES: Record<ThemeId, ThemeConfig> = {
-  light: {
-    id: 'light',
-    name: 'Light',
-    description: 'Clean porcelain white with crisp hairline cards',
+  free_theme_1: {
+    id: 'free_theme_1',
+    name: 'Basic Ugly',
+    tag: 'FREE',
+    description: 'Plain flat white box with basic borders',
     proOnly: false,
-    previewGradient: 'from-slate-50 via-white to-emerald-50',
-    pageBg: 'bg-gradient-to-br from-slate-50 via-white to-emerald-50/70 text-slate-900',
-    cardBg: 'bg-white/85 backdrop-blur-xl border border-slate-200/80 shadow-xl shadow-slate-900/5',
-    linkBg: 'bg-white hover:bg-emerald-50/70 border border-slate-200 text-slate-900',
+    previewGradient: 'from-white via-gray-100 to-gray-200',
+    pageBg: 'bg-gray-100 text-gray-900 font-sans',
+    cardBg: 'bg-white border border-gray-300 rounded-md shadow-none',
+    linkBg: 'bg-gray-50 hover:bg-gray-100 border border-gray-300 text-gray-900 rounded-md',
+    productCardBg: 'bg-gray-50 border border-gray-300 rounded-md',
+    ctaBg: 'bg-gray-800 hover:bg-gray-700 text-white rounded-md',
+    textPrimary: 'text-gray-900',
+    textMuted: 'text-gray-500',
+    priceColor: 'text-emerald-700',
+    badgeBg: 'bg-gray-200 text-gray-700',
+    avatarRing: 'ring-1 ring-gray-300',
+  },
+  free_theme_2: {
+    id: 'free_theme_2',
+    name: 'Simple Slate',
+    tag: 'FREE',
+    description: 'Plain light slate box — clean but basic',
+    proOnly: false,
+    previewGradient: 'from-slate-200 via-slate-100 to-slate-200',
+    pageBg: 'bg-slate-200 text-slate-900 font-sans',
+    cardBg: 'bg-slate-50 border border-slate-300 rounded-2xl shadow-sm',
+    linkBg: 'bg-white hover:bg-slate-100 border border-slate-300 text-slate-900 rounded-xl',
+    productCardBg: 'bg-white border border-slate-300 rounded-xl',
+    ctaBg: 'bg-slate-900 hover:bg-slate-800 text-white rounded-xl',
     textPrimary: 'text-slate-900',
     textMuted: 'text-slate-500',
-    badgeBg: 'bg-slate-100 text-slate-700',
+    priceColor: 'text-emerald-700',
+    badgeBg: 'bg-slate-200 text-slate-700',
+    avatarRing: 'ring-2 ring-slate-300',
   },
-  dark: {
-    id: 'dark',
-    name: 'Dark',
-    description: 'Deep obsidian canvas with frosted glass links',
-    proOnly: false,
-    previewGradient: 'from-zinc-950 via-slate-900 to-zinc-950',
-    pageBg: 'bg-gradient-to-br from-zinc-950 via-slate-950 to-zinc-900 text-zinc-50',
-    cardBg: 'bg-zinc-900/80 backdrop-blur-xl border border-white/10 shadow-2xl shadow-black/40',
-    linkBg: 'bg-white/[0.06] hover:bg-white/[0.12] border border-white/10 text-white',
+  selar_style: {
+    id: 'selar_style',
+    name: 'Selar Style',
+    tag: 'PREMIUM',
+    description: 'TAP9JA emerald-purple energy with glassmorphism & soft depth',
+    proOnly: true,
+    previewGradient: 'from-emerald-700 via-teal-700 to-purple-800',
+    pageBg: 'bg-gradient-to-br from-[#042f2e] via-[#0f172a] to-[#3b0764] text-white',
+    cardBg: 'bg-white/[0.09] backdrop-blur-2xl border border-white/20 rounded-3xl shadow-2xl shadow-emerald-950/60',
+    linkBg: 'bg-white/10 hover:bg-emerald-400/20 border border-white/15 text-white rounded-2xl',
+    productCardBg: 'bg-white/10 border border-emerald-300/25 rounded-2xl backdrop-blur-md',
+    ctaBg: 'bg-gradient-to-r from-emerald-500 to-purple-600 hover:opacity-95 text-white rounded-2xl shadow-lg shadow-emerald-950/40',
+    textPrimary: 'text-white',
+    textMuted: 'text-emerald-100/75',
+    priceColor: 'text-emerald-300',
+    badgeBg: 'bg-emerald-400/20 text-emerald-100',
+    avatarRing: 'ring-4 ring-emerald-400/50 shadow-lg shadow-emerald-500/20',
+  },
+  gumroad_style: {
+    id: 'gumroad_style',
+    name: 'Gumroad Style',
+    tag: 'PREMIUM',
+    description: 'Crisp editorial cream & ink with bold high-contrast offset cards',
+    proOnly: true,
+    previewGradient: 'from-amber-100 via-stone-100 to-zinc-900',
+    pageBg: 'bg-[#f4f1ea] text-zinc-950',
+    cardBg: 'bg-[#fffdf8] border-2 border-zinc-950 rounded-3xl shadow-[6px_6px_0px_0px_#09090b]',
+    linkBg: 'bg-white hover:bg-amber-200/70 border-2 border-zinc-950 text-zinc-950 rounded-2xl shadow-[3px_3px_0px_0px_#09090b]',
+    productCardBg: 'bg-[#fff8e7] border-2 border-zinc-950 rounded-2xl shadow-[3px_3px_0px_0px_#09090b]',
+    ctaBg: 'bg-zinc-950 hover:bg-emerald-700 text-white rounded-2xl shadow-[3px_3px_0px_0px_#10b981]',
+    textPrimary: 'text-zinc-950',
+    textMuted: 'text-zinc-600',
+    priceColor: 'text-emerald-700',
+    badgeBg: 'bg-zinc-950 text-amber-200',
+    avatarRing: 'ring-2 ring-zinc-950',
+  },
+  shopify_neon: {
+    id: 'shopify_neon',
+    name: 'Shopify Neon',
+    tag: 'PREMIUM',
+    description: 'Obsidian night canvas with electric emerald & cyan glow',
+    proOnly: true,
+    previewGradient: 'from-zinc-950 via-emerald-950 to-cyan-950',
+    pageBg: 'bg-[#05070d] bg-[radial-gradient(ellipse_at_top,_rgba(16,185,129,0.22),transparent_60%)] text-zinc-50',
+    cardBg: 'bg-zinc-900/90 backdrop-blur-2xl border border-emerald-400/30 rounded-3xl shadow-2xl shadow-emerald-500/15',
+    linkBg: 'bg-zinc-800/80 hover:bg-emerald-500/15 border border-emerald-400/25 text-white rounded-2xl',
+    productCardBg: 'bg-zinc-950/85 border border-emerald-400/35 rounded-2xl shadow-lg shadow-emerald-500/10',
+    ctaBg: 'bg-gradient-to-r from-emerald-400 to-cyan-400 hover:opacity-95 text-zinc-950 font-bold rounded-2xl shadow-lg shadow-emerald-500/25',
     textPrimary: 'text-white',
     textMuted: 'text-zinc-400',
-    badgeBg: 'bg-white/10 text-zinc-200',
+    priceColor: 'text-emerald-400',
+    badgeBg: 'bg-emerald-400/15 text-emerald-300 border border-emerald-400/30',
+    avatarRing: 'ring-4 ring-emerald-400/60 shadow-lg shadow-emerald-500/30',
   },
-  naija_green: {
-    id: 'naija_green',
-    name: 'Naija Green',
-    description: 'Rich Lagos emerald & deep forest glass',
+  instagram_luxury: {
+    id: 'instagram_luxury',
+    name: 'Instagram Luxury',
+    tag: 'PREMIUM',
+    description: 'Luminous sunset cover banner, story-ring avatar & silk cards',
     proOnly: true,
-    previewGradient: 'from-emerald-950 via-emerald-800 to-teal-900',
-    pageBg: 'bg-gradient-to-br from-emerald-950 via-green-900 to-teal-950 text-white',
-    cardBg: 'bg-emerald-950/65 backdrop-blur-xl border border-emerald-400/20 shadow-2xl shadow-emerald-950/60',
-    linkBg: 'bg-white/10 hover:bg-emerald-400/20 border border-emerald-300/20 text-white',
+    previewGradient: 'from-fuchsia-700 via-rose-600 to-amber-500',
+    pageBg: 'bg-gradient-to-b from-[#2b092f] via-[#1c0f24] to-[#0f172a] text-white',
+    cardBg: 'bg-white/[0.08] backdrop-blur-2xl border border-rose-300/25 rounded-3xl shadow-2xl shadow-fuchsia-950/60 overflow-hidden',
+    headerBanner: 'bg-gradient-to-r from-fuchsia-600 via-rose-500 to-amber-400',
+    linkBg: 'bg-white/10 hover:bg-rose-400/20 border border-white/15 text-white rounded-2xl',
+    productCardBg: 'bg-white/10 border border-amber-300/25 rounded-2xl backdrop-blur-md',
+    ctaBg: 'bg-gradient-to-r from-rose-500 via-fuchsia-600 to-amber-500 hover:opacity-95 text-white rounded-2xl shadow-lg shadow-rose-950/40',
     textPrimary: 'text-white',
-    textMuted: 'text-emerald-200/80',
-    badgeBg: 'bg-emerald-400/20 text-emerald-100',
+    textMuted: 'text-rose-100/80',
+    priceColor: 'text-emerald-300',
+    badgeBg: 'bg-rose-400/25 text-rose-100',
+    avatarRing: 'ring-4 ring-amber-300/80 shadow-xl shadow-rose-500/30',
   },
-  purple_hustle: {
-    id: 'purple_hustle',
-    name: 'Purple Hustle',
-    description: 'Royal violet-emerald gradient energy',
+  stripe_professional: {
+    id: 'stripe_professional',
+    name: 'Stripe Professional',
+    tag: 'PREMIUM',
+    description: 'Executive indigo-slate finish with precision hairline surfaces',
     proOnly: true,
-    previewGradient: 'from-purple-950 via-violet-900 to-emerald-950',
-    pageBg: 'bg-gradient-to-br from-[#190933] via-[#2e1065] to-[#064e3b] text-white',
-    cardBg: 'bg-white/[0.08] backdrop-blur-xl border border-purple-300/20 shadow-2xl shadow-purple-950/60',
-    linkBg: 'bg-white/10 hover:bg-purple-400/20 border border-white/15 text-white',
-    textPrimary: 'text-white',
-    textMuted: 'text-purple-200/80',
-    badgeBg: 'bg-purple-400/20 text-purple-100',
-  },
-  sunset: {
-    id: 'sunset',
-    name: 'Sunset',
-    description: 'Warm Afrobeats golden-hour plum & amber',
-    proOnly: true,
-    previewGradient: 'from-orange-950 via-rose-900 to-purple-950',
-    pageBg: 'bg-gradient-to-br from-orange-950 via-rose-900 to-purple-950 text-white',
-    cardBg: 'bg-black/35 backdrop-blur-xl border border-amber-300/20 shadow-2xl shadow-rose-950/60',
-    linkBg: 'bg-white/10 hover:bg-amber-400/20 border border-amber-200/15 text-white',
-    textPrimary: 'text-white',
-    textMuted: 'text-amber-100/80',
-    badgeBg: 'bg-amber-400/20 text-amber-100',
+    previewGradient: 'from-indigo-950 via-slate-900 to-emerald-950',
+    pageBg: 'bg-gradient-to-br from-slate-50 via-indigo-50/60 to-emerald-50/50 text-slate-950',
+    cardBg: 'bg-white/95 backdrop-blur-xl border border-indigo-200/80 rounded-3xl shadow-2xl shadow-indigo-950/10',
+    linkBg: 'bg-slate-50/90 hover:bg-indigo-50 border border-slate-200/90 text-slate-900 rounded-2xl shadow-sm',
+    productCardBg: 'bg-gradient-to-br from-white to-indigo-50/50 border border-indigo-200/80 rounded-2xl shadow-sm',
+    ctaBg: 'bg-gradient-to-r from-indigo-600 to-emerald-600 hover:opacity-95 text-white rounded-2xl shadow-md shadow-indigo-600/20',
+    textPrimary: 'text-slate-950',
+    textMuted: 'text-slate-500',
+    priceColor: 'text-emerald-700',
+    badgeBg: 'bg-indigo-100 text-indigo-800',
+    avatarRing: 'ring-4 ring-indigo-500/25 shadow-md',
   },
 };
+
+export const FREE_THEME_IDS: ThemeId[] = ['free_theme_1', 'free_theme_2'];
+export const PRO_THEME_IDS: ThemeId[] = [
+  'selar_style',
+  'gumroad_style',
+  'shopify_neon',
+  'instagram_luxury',
+  'stripe_professional',
+];
+
+const LEGACY_THEME_MAP: Record<string, ThemeId> = {
+  light: 'free_theme_1',
+  dark: 'free_theme_2',
+  naija_green: 'selar_style',
+  purple_hustle: 'instagram_luxury',
+  sunset: 'shopify_neon',
+};
+
+export function normalizeThemeKey(rawTheme: string | null | undefined): ThemeId {
+  const key = (rawTheme || '').trim();
+  if (key in THEMES) return key as ThemeId;
+  if (key in LEGACY_THEME_MAP) return LEGACY_THEME_MAP[key];
+  return 'free_theme_1';
+}
+
+export function resolveThemeId(rawTheme: string | null | undefined, activePro: boolean): ThemeId {
+  const normalized = normalizeThemeKey(rawTheme);
+  if (activePro) {
+    return normalized;
+  }
+  // When Free or Expired Pro: only free_theme_2 is preserved if explicitly free_theme_2 (or legacy free 'dark');
+  // any Pro theme (or missing/expired) reverts automatically to Free Theme 1 (Basic Ugly).
+  if (normalized === 'free_theme_2') {
+    return 'free_theme_2';
+  }
+  return 'free_theme_1';
+}
+
+export function isPremiumTheme(themeId: string | null | undefined): boolean {
+  const normalized = normalizeThemeKey(themeId);
+  return Boolean(THEMES[normalized]?.proOnly);
+}
+
+export function maskEmail(rawEmail: string | null | undefined): string {
+  const email = (rawEmail || '').trim();
+  if (!email || !email.includes('@')) return 'Anonymous buyer';
+  const [local, domain] = email.split('@');
+  if (!domain) return '***';
+  const prefix = local.slice(0, Math.min(2, local.length));
+  return `${prefix}***@${domain}`;
+}
 
 export interface NigerianBank {
   code: string;

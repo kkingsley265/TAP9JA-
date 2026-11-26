@@ -6,6 +6,8 @@ import {
   MessageCircle,
   QrCode,
   Share2,
+  ShieldCheck,
+  ShoppingBag,
   Zap,
 } from 'lucide-react';
 import { useEffect, useState, type MouseEvent } from 'react';
@@ -15,9 +17,18 @@ import { BrandMark } from '../components/BrandMark';
 import { FreePlanAdModal } from '../components/FreePlanAdModal';
 import { PlatformBadgeIcon, VerifiedBlueTick } from '../components/PlatformIcon';
 import { QrModal } from '../components/QrModal';
+import { StoreBuyModal } from '../components/StoreBuyModal';
 import { TipModal } from '../components/TipModal';
-import { apiFetch, type PublicBioResponse } from '../lib/api';
-import { isProActive, parseSpotifyEmbed, parseYouTubeEmbed, THEMES } from '../shared/platforms';
+import { apiFetch, type PublicBioResponse, type PublicProduct } from '../lib/api';
+import {
+  formatNairaFromKobo,
+  isProActive,
+  parseSpotifyEmbed,
+  parseYouTubeEmbed,
+  PRODUCT_TYPES,
+  resolveThemeId,
+  THEMES,
+} from '../shared/platforms';
 
 export default function PublicBioPage() {
   const { username = '' } = useParams();
@@ -29,6 +40,7 @@ export default function PublicBioPage() {
   const [error, setError] = useState('');
   const [qrOpen, setQrOpen] = useState(false);
   const [tipOpen, setTipOpen] = useState(false);
+  const [selectedProduct, setSelectedProduct] = useState<PublicProduct | null>(null);
   const [copiedShare, setCopiedShare] = useState(false);
   const [adConfig, setAdConfig] = useState<{ adsEnabled: boolean; adCode: string } | null>(null);
   const [pendingLink, setPendingLink] = useState<{ id: string; title: string; url: string } | null>(null);
@@ -38,6 +50,7 @@ export default function PublicBioPage() {
     setError('');
     setAdConfig(null);
     setPendingLink(null);
+    setSelectedProduct(null);
     apiFetch<PublicBioResponse>(
       `/api/public/profile/${encodeURIComponent(username)}${isPreview ? '?preview=1' : ''}`,
       { authMode: 'none', cache: 'no-store' }
@@ -121,6 +134,18 @@ export default function PublicBioPage() {
     setPendingLink(null);
   };
 
+  const handleProductPurchased = (productId: string) => {
+    setData((prev) => {
+      if (!prev || !prev.products) return prev;
+      return {
+        ...prev,
+        products: prev.products.map((p) =>
+          p.id === productId ? { ...p, sales_count: p.sales_count + 1 } : p
+        ),
+      };
+    });
+  };
+
   const handleShare = async () => {
     const url = window.location.href.split('?')[0];
     if (navigator.share) {
@@ -184,22 +209,28 @@ export default function PublicBioPage() {
     );
   }
 
-  const { profile, links } = data;
-  const theme = THEMES[profile.theme] || THEMES.light;
-  const ytEmbed = parseYouTubeEmbed(profile.youtube_url);
-  const spotifyEmbed = parseSpotifyEmbed(profile.spotify_url);
-  const whatsappClean = (profile.whatsapp_number || '').replace(/[^0-9]/g, '');
+  const { profile, links, products = [] } = data;
   const hasActivePro =
     Boolean(profile.is_pro) &&
     (profile.pro_expires_at
       ? isProActive(profile.is_pro, profile.pro_expires_at)
       : profile.show_watermark === false);
   const showWatermark = !hasActivePro;
+  const resolvedThemeId = resolveThemeId(profile.theme, hasActivePro);
+  const theme = THEMES[resolvedThemeId] || THEMES.free_theme_1;
+  const ytEmbed = parseYouTubeEmbed(profile.youtube_url);
+  const spotifyEmbed = parseSpotifyEmbed(profile.spotify_url);
+  const whatsappClean = (profile.whatsapp_number || '').replace(/[^0-9]/g, '');
 
   return (
     <div className={`min-h-screen ${theme.pageBg} py-8 px-4 flex flex-col items-center transition-colors`}>
-      <main className="w-full max-w-[460px] mx-auto">
-        <div className={`rounded-3xl p-6 sm:p-7 ${theme.cardBg}`}>
+      <main className="w-full max-w-[480px] mx-auto">
+        <div className={`relative p-6 sm:p-7 ${theme.cardBg}`}>
+          {/* Optional Premium Cover Banner (Instagram Luxury) */}
+          {theme.headerBanner && (
+            <div className={`-mx-6 -mt-6 sm:-mx-7 sm:-mt-7 h-24 ${theme.headerBanner} mb-4 opacity-95`} />
+          )}
+
           {/* Top Action Utility Row */}
           <div className="flex items-center justify-between gap-2 mb-4">
             <div className={`inline-flex items-center gap-1.5 text-xs font-mono-nums ${theme.textMuted}`}>
@@ -210,7 +241,7 @@ export default function PublicBioPage() {
               <button
                 type="button"
                 onClick={() => setQrOpen(true)}
-                className={`h-10 w-10 rounded-2xl flex items-center justify-center transition-colors ${theme.linkBg}`}
+                className={`h-10 w-10 flex items-center justify-center transition-colors ${theme.linkBg}`}
                 aria-label="Show QR Code"
                 title="Show QR Code"
               >
@@ -219,7 +250,7 @@ export default function PublicBioPage() {
               <button
                 type="button"
                 onClick={handleShare}
-                className={`h-10 px-3 rounded-2xl flex items-center gap-1.5 text-xs font-semibold transition-colors ${theme.linkBg}`}
+                className={`h-10 px-3 flex items-center gap-1.5 text-xs font-semibold transition-colors ${theme.linkBg}`}
                 aria-label="Share profile link"
               >
                 {copiedShare ? <Check className="h-4 w-4 text-emerald-500" /> : <Share2 className="h-4 w-4" />}
@@ -229,8 +260,13 @@ export default function PublicBioPage() {
           </div>
 
           {/* Profile Header */}
-          <div className="flex flex-col items-center text-center">
-            <Avatar src={profile.avatar_url} name={profile.name} sizeClass="h-24 w-24" />
+          <div className={`flex flex-col items-center text-center ${theme.headerBanner ? '-mt-2' : ''}`}>
+            <Avatar
+              src={profile.avatar_url}
+              name={profile.name}
+              sizeClass="h-24 w-24"
+              ringClass={theme.avatarRing}
+            />
             <div className="mt-4 flex items-center justify-center gap-1.5">
               <h1 className={`text-2xl font-display font-extrabold tracking-tight ${theme.textPrimary}`}>
                 {profile.name}
@@ -246,29 +282,6 @@ export default function PublicBioPage() {
             )}
             {profile.bio && (
               <p className={`text-sm mt-3 leading-relaxed max-w-sm ${theme.textPrimary} opacity-90`}>{profile.bio}</p>
-            )}
-          </div>
-
-          {/* Tip Jar CTA + Optional WhatsApp Quick Chat */}
-          <div className="mt-6 flex flex-col sm:flex-row gap-2.5">
-            <button
-              type="button"
-              onClick={() => setTipOpen(true)}
-              className="flex-1 h-12 px-5 rounded-2xl bg-gradient-to-r from-emerald-600 to-purple-700 text-white text-sm font-semibold hover:opacity-95 transition-opacity inline-flex items-center justify-center gap-2 shadow-lg shadow-emerald-950/20"
-            >
-              <HeartHandshake className="h-4 w-4" />
-              Support Me
-            </button>
-            {whatsappClean && (
-              <a
-                href={`https://wa.me/${whatsappClean}`}
-                target="_blank"
-                rel="noopener noreferrer"
-                className={`h-12 px-4 rounded-2xl text-sm font-semibold inline-flex items-center justify-center gap-2 transition-colors ${theme.linkBg}`}
-              >
-                <MessageCircle className="h-4 w-4 text-emerald-500" />
-                WhatsApp
-              </a>
             )}
           </div>
 
@@ -308,7 +321,7 @@ export default function PublicBioPage() {
           {/* Active Links List */}
           <div className="mt-6 space-y-3">
             {links.length === 0 ? (
-              <p className={`text-center text-sm py-6 ${theme.textMuted}`}>No links added yet.</p>
+              <p className={`text-center text-sm py-4 ${theme.textMuted}`}>No links added yet.</p>
             ) : (
               links.map((link) => (
                 <a
@@ -317,7 +330,7 @@ export default function PublicBioPage() {
                   target="_blank"
                   rel="noopener noreferrer"
                   onClick={(e) => handleCreatorLinkAction(e, link, hasActivePro, profile.username)}
-                  className={`group flex items-center gap-3.5 p-3 rounded-2xl transition-all hover:scale-[1.01] active:scale-[0.99] ${theme.linkBg}`}
+                  className={`group flex items-center gap-3.5 p-3 transition-all hover:scale-[1.01] active:scale-[0.99] ${theme.linkBg}`}
                 >
                   <PlatformBadgeIcon platform={link.platform} />
                   <span className="flex-1 text-sm font-semibold truncate">{link.title}</span>
@@ -326,12 +339,107 @@ export default function PublicBioPage() {
               ))
             )}
           </div>
+
+          {/* TAP9JA Digital Store Section (Placed Below Links, Above Tip Jar — Zero Ads) */}
+          {products.length > 0 && (
+            <section aria-label="Creator Digital Shop" className="mt-7 pt-6 border-t border-current/10 space-y-3.5">
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2">
+                  <ShoppingBag className={`h-4 w-4 ${theme.priceColor}`} />
+                  <h2 className={`text-sm font-display font-bold uppercase tracking-wider ${theme.textPrimary}`}>
+                    Digital Store
+                  </h2>
+                </div>
+                {hasActivePro && (
+                  <span className="inline-flex items-center gap-1 rounded-lg bg-emerald-500/15 border border-emerald-500/30 px-2 py-0.5 text-[11px] font-semibold text-emerald-500">
+                    <ShieldCheck className="h-3 w-3" />
+                    Pro Trusted Store
+                  </span>
+                )}
+              </div>
+
+              <div className="space-y-3">
+                {products.map((product) => {
+                  const typeMeta = PRODUCT_TYPES[product.product_type] || PRODUCT_TYPES.file;
+                  return (
+                    <div key={product.id} className={`p-3.5 sm:p-4 ${theme.productCardBg}`}>
+                      <div className="flex gap-3 items-start">
+                        {product.cover_url && (
+                          <img
+                            src={product.cover_url}
+                            alt={product.title}
+                            loading="lazy"
+                            className="h-16 w-16 rounded-xl object-cover shrink-0 border border-black/10"
+                          />
+                        )}
+                        <div className="flex-1 min-w-0">
+                          <div className="flex flex-wrap items-center gap-1.5 mb-1">
+                            <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold uppercase ${theme.badgeBg}`}>
+                              {typeMeta.shortLabel}
+                            </span>
+                            {product.sales_count > 0 && (
+                              <span className={`text-[11px] font-mono-nums ${theme.textMuted}`}>
+                                · {product.sales_count} bought
+                              </span>
+                            )}
+                          </div>
+                          <h3 className={`text-sm font-display font-bold leading-snug ${theme.textPrimary}`}>
+                            {product.title}
+                          </h3>
+                          {product.description && (
+                            <p className={`text-xs mt-1 line-clamp-2 ${theme.textMuted}`}>{product.description}</p>
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="mt-3 pt-2.5 border-t border-current/10 flex items-center justify-between gap-3">
+                        <span className={`text-base font-display font-extrabold font-mono-nums ${theme.priceColor}`}>
+                          {formatNairaFromKobo(product.price_kobo)}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => setSelectedProduct(product)}
+                          className={`h-9 px-4 text-xs font-bold inline-flex items-center gap-1.5 transition-all ${theme.ctaBg}`}
+                        >
+                          <ShoppingBag className="h-3.5 w-3.5" />
+                          <span>Buy Now</span>
+                        </button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
+          )}
+
+          {/* Tip Jar Section + Optional WhatsApp Quick Chat (Placed Below Links / Shop) */}
+          <div className="mt-7 pt-6 border-t border-current/10 flex flex-col sm:flex-row gap-2.5">
+            <button
+              type="button"
+              onClick={() => setTipOpen(true)}
+              className={`flex-1 h-12 px-5 text-sm font-semibold inline-flex items-center justify-center gap-2 transition-all ${theme.ctaBg}`}
+            >
+              <HeartHandshake className="h-4 w-4" />
+              <span>Support Me</span>
+            </button>
+            {whatsappClean && (
+              <a
+                href={`https://wa.me/${whatsappClean}`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className={`h-12 px-4 text-sm font-semibold inline-flex items-center justify-center gap-2 transition-colors ${theme.linkBg}`}
+              >
+                <MessageCircle className="h-4 w-4 text-emerald-500" />
+                <span>WhatsApp</span>
+              </a>
+            )}
+          </div>
         </div>
       </main>
 
       {/* Conditional Watermark: Shown ONLY for Free / Expired Pro */}
       {showWatermark && (
-        <footer className="mt-6 pb-4 text-center w-full max-w-[460px] mx-auto">
+        <footer className="mt-6 pb-4 text-center w-full max-w-[480px] mx-auto">
           <Link
             to="/"
             className={`inline-block text-xs font-medium hover:underline underline-offset-4 transition-opacity ${theme.textMuted}`}
@@ -352,6 +460,14 @@ export default function PublicBioPage() {
         onClose={() => setTipOpen(false)}
         username={profile.username}
         creatorName={profile.name}
+      />
+      <StoreBuyModal
+        open={Boolean(selectedProduct)}
+        onClose={() => setSelectedProduct(null)}
+        product={selectedProduct}
+        username={profile.username}
+        creatorName={profile.name}
+        onPurchased={handleProductPurchased}
       />
       {!hasActivePro && adConfig?.adsEnabled && (
         <FreePlanAdModal

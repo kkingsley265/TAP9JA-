@@ -1,9 +1,16 @@
 import {
   detectPlatform,
+  isPremiumTheme,
   isProActive,
+  maskEmail,
   NIGERIAN_BANKS,
   normalizeLinkUrl,
+  normalizeThemeKey,
+  parseProductEmbed,
+  PRODUCT_TYPES,
+  resolveThemeId,
   THEMES,
+  type ProductType,
   type ThemeId,
 } from '../../src/shared/platforms.ts';
 import {
@@ -69,6 +76,22 @@ interface LinkRow {
   created_at: string;
 }
 
+interface ProductRow {
+  id: string;
+  user_id: string;
+  username: string;
+  title: string;
+  description: string;
+  price_kobo: number;
+  product_type: string;
+  cover_url: string;
+  external_url: string;
+  is_active: number;
+  sales_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
 function jsonResponse(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
     status,
@@ -91,7 +114,7 @@ function sanitizeUser(row: UserRow) {
     youtube_url: row.youtube_url,
     spotify_url: row.spotify_url,
     whatsapp_number: row.whatsapp_number,
-    theme: row.theme,
+    theme: resolveThemeId(row.theme, activePro),
     bank_code: row.bank_code,
     bank_name: row.bank_name,
     account_number: row.account_number,
@@ -315,6 +338,14 @@ async function recordVerifiedTip(
     return { status: 'conflict', amountKobo: 0, commissionKobo: 0, netKobo: 0 };
   }
 
+  const existingSale = await db
+    .prepare('SELECT id FROM product_sales WHERE paystack_reference = ?')
+    .bind(params.reference)
+    .first();
+  if (existingSale) {
+    return { status: 'conflict', amountKobo: 0, commissionKobo: 0, netKobo: 0 };
+  }
+
   const amountKobo = Math.round(params.amountKobo);
   const commissionKobo = Math.round(amountKobo * 0.1);
   const netKobo = amountKobo - commissionKobo;
@@ -404,6 +435,14 @@ async function recordVerifiedPro(
     return { status: 'conflict', expiresAt: '', user: null };
   }
 
+  const existingSale = await db
+    .prepare('SELECT id FROM product_sales WHERE paystack_reference = ?')
+    .bind(params.reference)
+    .first();
+  if (existingSale) {
+    return { status: 'conflict', expiresAt: '', user: null };
+  }
+
   const nowMs = Date.now();
   const existingExpiryMs = params.user.pro_expires_at ? new Date(params.user.pro_expires_at).getTime() : 0;
   const baseMs =
@@ -446,6 +485,132 @@ async function recordVerifiedPro(
 
   const updated = await db.prepare('SELECT * FROM users WHERE id = ?').bind(params.user.id).first<UserRow>();
   return { status: 'credited', expiresAt: newExpiry, user: updated };
+}
+
+async function recordVerifiedProductSale(
+  db: D1DatabaseLike,
+  params: {
+    product: ProductRow;
+    seller: UserRow;
+    reference: string;
+    amountKobo: number;
+    buyerEmail: string;
+  }
+): Promise<{
+  status: 'credited' | 'already_credited' | 'conflict';
+  amountKobo: number;
+  commissionKobo: number;
+  netKobo: number;
+}> {
+  const existingSale = await db
+    .prepare(
+      'SELECT product_id, seller_id, amount_kobo, commission_kobo, net_kobo FROM product_sales WHERE paystack_reference = ?'
+    )
+    .bind(params.reference)
+    .first<{
+      product_id: string;
+      seller_id: string;
+      amount_kobo: number;
+      commission_kobo: number;
+      net_kobo: number;
+    }>();
+
+  if (existingSale) {
+    if (existingSale.product_id === params.product.id && existingSale.seller_id === params.seller.id) {
+      return {
+        status: 'already_credited',
+        amountKobo: Number(existingSale.amount_kobo),
+        commissionKobo: Number(existingSale.commission_kobo),
+        netKobo: Number(existingSale.net_kobo),
+      };
+    }
+    return { status: 'conflict', amountKobo: 0, commissionKobo: 0, netKobo: 0 };
+  }
+
+  const existingTip = await db
+    .prepare('SELECT id FROM tips WHERE paystack_reference = ?')
+    .bind(params.reference)
+    .first();
+  if (existingTip) {
+    return { status: 'conflict', amountKobo: 0, commissionKobo: 0, netKobo: 0 };
+  }
+
+  const existingPro = await db
+    .prepare('SELECT id FROM pro_payments WHERE paystack_reference = ?')
+    .bind(params.reference)
+    .first();
+  if (existingPro) {
+    return { status: 'conflict', amountKobo: 0, commissionKobo: 0, netKobo: 0 };
+  }
+
+  const amountKobo = Math.round(params.amountKobo);
+  const commissionKobo = Math.round(amountKobo * 0.1);
+  const netKobo = amountKobo - commissionKobo;
+  const now = new Date().toISOString();
+
+  const insertRes = await db
+    .prepare(
+      `INSERT OR IGNORE INTO product_sales (
+        id, product_id, product_title, product_type, seller_id, seller_username, buyer_email,
+        amount_kobo, commission_kobo, net_kobo, paystack_reference, status, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'success', ?)`
+    )
+    .bind(
+      generateId(),
+      params.product.id,
+      params.product.title,
+      params.product.product_type,
+      params.seller.id,
+      params.seller.username,
+      params.buyerEmail,
+      amountKobo,
+      commissionKobo,
+      netKobo,
+      params.reference,
+      now
+    )
+    .run();
+
+  if ((insertRes.meta?.changes ?? 0) === 0) {
+    const raced = await db
+      .prepare(
+        'SELECT product_id, seller_id, amount_kobo, commission_kobo, net_kobo FROM product_sales WHERE paystack_reference = ?'
+      )
+      .bind(params.reference)
+      .first<{
+        product_id: string;
+        seller_id: string;
+        amount_kobo: number;
+        commission_kobo: number;
+        net_kobo: number;
+      }>();
+    if (raced && raced.product_id === params.product.id && raced.seller_id === params.seller.id) {
+      return {
+        status: 'already_credited',
+        amountKobo: Number(raced.amount_kobo),
+        commissionKobo: Number(raced.commission_kobo),
+        netKobo: Number(raced.net_kobo),
+      };
+    }
+    return { status: 'conflict', amountKobo: 0, commissionKobo: 0, netKobo: 0 };
+  }
+
+  await db
+    .prepare('UPDATE products SET sales_count = sales_count + 1 WHERE id = ?')
+    .bind(params.product.id)
+    .run();
+
+  await db
+    .prepare(
+      `UPDATE users SET
+        pending_balance_kobo = pending_balance_kobo + ?,
+        total_earnings_kobo = total_earnings_kobo + ?
+       WHERE id = ?`
+    )
+    .bind(netKobo, netKobo, params.seller.id)
+    .run();
+
+  return { status: 'credited', amountKobo, commissionKobo, netKobo };
 }
 
 export async function handleApiRequest(req: Request, env: EnvBindings): Promise<Response> {
@@ -799,7 +964,7 @@ export async function handleApiRequest(req: Request, env: EnvBindings): Promise<
     });
   }
 
-  // Current authenticated user + links
+  // Current authenticated user + links + plan expiry notices
   if (method === 'GET' && path === '/api/me') {
     let user: UserRow | null = null;
     try {
@@ -815,12 +980,31 @@ export async function handleApiRequest(req: Request, env: EnvBindings): Promise<
       .bind(user.id)
       .all<LinkRow>();
 
+    const activePro = isProActive(user.is_pro, user.pro_expires_at);
+    const activeLinksCount = linksRes.results.filter((l) => Number(l.is_active) === 1).length;
+    const prodAgg = await env.DB.prepare(
+      'SELECT COUNT(*) as total FROM products WHERE user_id = ? AND is_active = 1'
+    )
+      .bind(user.id)
+      .first<{ total: number }>();
+    const activeProductsCount = Number(prodAgg?.total ?? 0);
+    const hadExpiredPro = Boolean(!activePro && user.pro_expires_at);
+    const hiddenLinksCount = !activePro ? Math.max(0, activeLinksCount - 5) : 0;
+    const hiddenProductsCount = !activePro ? Math.max(0, activeProductsCount - 3) : 0;
+    const revertedTheme = Boolean(!activePro && isPremiumTheme(user.theme));
+
     return jsonResponse({
       user: sanitizeUser(user),
       links: linksRes.results.map((l) => ({
         ...l,
         is_active: Boolean(l.is_active),
       })),
+      planNotice: {
+        hadExpiredPro,
+        hiddenLinksCount,
+        hiddenProductsCount,
+        revertedTheme,
+      },
     });
   }
 
@@ -836,7 +1020,7 @@ export async function handleApiRequest(req: Request, env: EnvBindings): Promise<
       youtube_url?: string;
       spotify_url?: string;
       whatsapp_number?: string;
-      theme?: ThemeId;
+      theme?: string;
       bank_code?: string;
       account_number?: string;
       account_name?: string;
@@ -859,13 +1043,27 @@ export async function handleApiRequest(req: Request, env: EnvBindings): Promise<
     const spotifyUrl = (body.spotify_url ?? user.spotify_url).trim();
     const whatsappNumber = (body.whatsapp_number ?? user.whatsapp_number).trim();
 
-    const requestedTheme = (body.theme ?? user.theme) as ThemeId;
-    const themeMeta = THEMES[requestedTheme];
-    if (!themeMeta) return jsonResponse({ error: 'Invalid theme selected.' }, 400);
-
     const activePro = isProActive(user.is_pro, user.pro_expires_at);
-    if (themeMeta.proOnly && !activePro) {
-      return jsonResponse({ error: `${themeMeta.name} theme requires an active Pro subscription.` }, 403);
+    let targetTheme: ThemeId;
+    if (body.theme !== undefined) {
+      const requested = String(body.theme).trim();
+      const mapped = normalizeThemeKey(requested);
+      const isRecognized =
+        requested in THEMES ||
+        ['light', 'dark', 'naija_green', 'purple_hustle', 'sunset'].includes(requested);
+      if (!isRecognized) return jsonResponse({ error: 'Invalid theme selected.' }, 400);
+      if (THEMES[mapped].proOnly && !activePro) {
+        return jsonResponse(
+          {
+            error:
+              'This premium theme makes you sell 3 times more — Upgrade to Pro ₦1,000 for 30 days to unlock all 5 beautiful themes.',
+          },
+          403
+        );
+      }
+      targetTheme = mapped;
+    } else {
+      targetTheme = resolveThemeId(user.theme, activePro);
     }
 
     const bankCode = (body.bank_code ?? user.bank_code).trim();
@@ -892,7 +1090,7 @@ export async function handleApiRequest(req: Request, env: EnvBindings): Promise<
         youtubeUrl,
         spotifyUrl,
         whatsappNumber,
-        requestedTheme,
+        targetTheme,
         bankCode,
         bankName,
         accountNumber,
@@ -903,6 +1101,232 @@ export async function handleApiRequest(req: Request, env: EnvBindings): Promise<
 
     const updated = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(user.id).first<UserRow>();
     return jsonResponse({ user: updated ? sanitizeUser(updated) : null });
+  }
+
+  // Creator Store Products CRUD (Text / Link only — zero file upload)
+  if (method === 'GET' && path === '/api/products') {
+    const user = await getAuthUser(req, env);
+    if (!user) return jsonResponse({ error: 'Unauthorized' }, 401);
+
+    const activePro = isProActive(user.is_pro, user.pro_expires_at);
+    const rowsRes = await env.DB.prepare(
+      'SELECT * FROM products WHERE user_id = ? ORDER BY created_at ASC'
+    )
+      .bind(user.id)
+      .all<ProductRow>();
+
+    const products = rowsRes.results.map((p) => ({
+      id: p.id,
+      user_id: p.user_id,
+      username: p.username,
+      title: p.title,
+      description: p.description,
+      price_kobo: Number(p.price_kobo),
+      product_type: p.product_type as ProductType,
+      cover_url: p.cover_url,
+      external_url: p.external_url,
+      is_active: Boolean(p.is_active),
+      sales_count: Number(p.sales_count || 0),
+      created_at: p.created_at,
+      updated_at: p.updated_at,
+    }));
+
+    const activeCount = products.filter((p) => p.is_active).length;
+
+    return jsonResponse({
+      products,
+      activeCount,
+      freeLimit: 3,
+      isPro: activePro,
+    });
+  }
+
+  if (method === 'POST' && path === '/api/products') {
+    const user = await getAuthUser(req, env);
+    if (!user) return jsonResponse({ error: 'Unauthorized' }, 401);
+
+    const body = await parseJsonBody<{
+      title?: string;
+      description?: string;
+      price_ngn?: number | string;
+      product_type?: string;
+      cover_url?: string;
+      external_url?: string;
+    }>(req);
+    if (!body) return jsonResponse({ error: 'Invalid JSON payload' }, 400);
+
+    const title = (body.title || '').trim().slice(0, 60);
+    const description = (body.description || '').trim().slice(0, 300);
+    const priceNgn = Number(body.price_ngn);
+    const productType = (body.product_type || '').trim() as ProductType;
+    const coverUrl = (body.cover_url || '').trim();
+    const externalUrl = normalizeLinkUrl(body.external_url || '');
+
+    if (title.length < 2) {
+      return jsonResponse({ error: 'Product title must be between 2 and 60 characters.' }, 400);
+    }
+    if (!Number.isFinite(priceNgn) || priceNgn < 200 || priceNgn > 50000) {
+      return jsonResponse({ error: 'Product price must be between ₦200 and ₦50,000.' }, 400);
+    }
+    if (!(productType in PRODUCT_TYPES)) {
+      return jsonResponse({ error: 'Please select a valid product type.' }, 400);
+    }
+    if (coverUrl && (!isValidHttpUrl(coverUrl) || coverUrl.startsWith('demo:'))) {
+      return jsonResponse({ error: 'Cover image must be a valid http/https image URL.' }, 400);
+    }
+    if (!externalUrl || (!externalUrl.startsWith('http://') && !externalUrl.startsWith('https://'))) {
+      return jsonResponse({ error: 'Please paste a valid http/https delivery link for your product.' }, 400);
+    }
+
+    const activePro = isProActive(user.is_pro, user.pro_expires_at);
+    const activeCountRow = await env.DB.prepare(
+      'SELECT COUNT(*) as total FROM products WHERE user_id = ? AND is_active = 1'
+    )
+      .bind(user.id)
+      .first<{ total: number }>();
+
+    if (!activePro && Number(activeCountRow?.total ?? 0) >= 3) {
+      return jsonResponse(
+        {
+          error: 'Free plan limited to 3 active products — Upgrade to Pro ₦1,000/month for unlimited products.',
+          code: 'FREE_PRODUCT_LIMIT_REACHED',
+        },
+        403
+      );
+    }
+
+    const id = generateId();
+    const priceKobo = Math.round(priceNgn * 100);
+    const now = new Date().toISOString();
+
+    await env.DB.prepare(
+      `INSERT INTO products (
+        id, user_id, username, title, description, price_kobo, product_type, cover_url, external_url,
+        is_active, sales_count, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?)`
+    )
+      .bind(id, user.id, user.username, title, description, priceKobo, productType, coverUrl, externalUrl, now, now)
+      .run();
+
+    const created = await env.DB.prepare('SELECT * FROM products WHERE id = ?').bind(id).first<ProductRow>();
+    return jsonResponse(
+      {
+        product: created
+          ? {
+              ...created,
+              price_kobo: Number(created.price_kobo),
+              is_active: Boolean(created.is_active),
+              sales_count: Number(created.sales_count || 0),
+            }
+          : null,
+      },
+      201
+    );
+  }
+
+  const productMatch = path.match(/^\/api\/products\/([^/]+)$/);
+  if (productMatch) {
+    const productId = productMatch[1];
+    const user = await getAuthUser(req, env);
+    if (!user) return jsonResponse({ error: 'Unauthorized' }, 401);
+
+    const existing = await env.DB.prepare('SELECT * FROM products WHERE id = ? AND user_id = ?')
+      .bind(productId, user.id)
+      .first<ProductRow>();
+    if (!existing) return jsonResponse({ error: 'Product not found' }, 404);
+
+    if (method === 'PUT') {
+      const body = await parseJsonBody<{
+        title?: string;
+        description?: string;
+        price_ngn?: number | string;
+        product_type?: string;
+        cover_url?: string;
+        external_url?: string;
+        is_active?: boolean;
+      }>(req);
+      if (!body) return jsonResponse({ error: 'Invalid JSON payload' }, 400);
+
+      const title = (body.title ?? existing.title).trim().slice(0, 60);
+      const description = (body.description ?? existing.description).trim().slice(0, 300);
+      const priceKobo =
+        body.price_ngn !== undefined
+          ? (() => {
+              const p = Number(body.price_ngn);
+              if (!Number.isFinite(p) || p < 200 || p > 50000) return -1;
+              return Math.round(p * 100);
+            })()
+          : Number(existing.price_kobo);
+
+      if (title.length < 2) {
+        return jsonResponse({ error: 'Product title must be between 2 and 60 characters.' }, 400);
+      }
+      if (priceKobo < 20000) {
+        return jsonResponse({ error: 'Product price must be between ₦200 and ₦50,000.' }, 400);
+      }
+
+      const productType = ((body.product_type ?? existing.product_type) as string).trim() as ProductType;
+      if (!(productType in PRODUCT_TYPES)) {
+        return jsonResponse({ error: 'Please select a valid product type.' }, 400);
+      }
+
+      const coverUrl = (body.cover_url ?? existing.cover_url).trim();
+      if (coverUrl && (!isValidHttpUrl(coverUrl) || coverUrl.startsWith('demo:'))) {
+        return jsonResponse({ error: 'Cover image must be a valid http/https image URL.' }, 400);
+      }
+
+      const externalUrl =
+        body.external_url !== undefined ? normalizeLinkUrl(body.external_url) : existing.external_url;
+      if (!externalUrl || (!externalUrl.startsWith('http://') && !externalUrl.startsWith('https://'))) {
+        return jsonResponse({ error: 'Please paste a valid http/https delivery link for your product.' }, 400);
+      }
+
+      const nextActive = body.is_active !== undefined ? (body.is_active ? 1 : 0) : existing.is_active;
+      const activePro = isProActive(user.is_pro, user.pro_expires_at);
+      if (nextActive === 1 && existing.is_active === 0 && !activePro) {
+        const activeCountRow = await env.DB.prepare(
+          'SELECT COUNT(*) as total FROM products WHERE user_id = ? AND is_active = 1'
+        )
+          .bind(user.id)
+          .first<{ total: number }>();
+        if (Number(activeCountRow?.total ?? 0) >= 3) {
+          return jsonResponse(
+            {
+              error: 'Free plan limited to 3 active products — Upgrade to Pro ₦1,000/month for unlimited products.',
+              code: 'FREE_PRODUCT_LIMIT_REACHED',
+            },
+            403
+          );
+        }
+      }
+
+      const now = new Date().toISOString();
+      await env.DB.prepare(
+        `UPDATE products SET
+          title = ?, description = ?, price_kobo = ?, product_type = ?,
+          cover_url = ?, external_url = ?, is_active = ?, updated_at = ?
+         WHERE id = ? AND user_id = ?`
+      )
+        .bind(title, description, priceKobo, productType, coverUrl, externalUrl, nextActive, now, productId, user.id)
+        .run();
+
+      const updated = await env.DB.prepare('SELECT * FROM products WHERE id = ?').bind(productId).first<ProductRow>();
+      return jsonResponse({
+        product: updated
+          ? {
+              ...updated,
+              price_kobo: Number(updated.price_kobo),
+              is_active: Boolean(updated.is_active),
+              sales_count: Number(updated.sales_count || 0),
+            }
+          : null,
+      });
+    }
+
+    if (method === 'DELETE') {
+      await env.DB.prepare('DELETE FROM products WHERE id = ? AND user_id = ?').bind(productId, user.id).run();
+      return jsonResponse({ deleted: true });
+    }
   }
 
   // Create link (enforces 5-link cap for Free users on backend!)
@@ -1088,8 +1512,8 @@ export async function handleApiRequest(req: Request, env: EnvBindings): Promise<
     });
   }
 
-  // Creator Tips & Earnings
-  if (method === 'GET' && path === '/api/tips') {
+  // Creator Unified Earnings (Tips + Digital Store Sales)
+  if (method === 'GET' && (path === '/api/tips' || path === '/api/earnings')) {
     const user = await getAuthUser(req, env);
     if (!user) return jsonResponse({ error: 'Unauthorized' }, 401);
 
@@ -1098,7 +1522,46 @@ export async function handleApiRequest(req: Request, env: EnvBindings): Promise<
        FROM tips WHERE to_user_id = ? ORDER BY created_at DESC LIMIT 100`
     )
       .bind(user.id)
-      .all();
+      .all<{
+        id: string;
+        from_name: string;
+        message: string;
+        amount_kobo: number;
+        commission_kobo: number;
+        net_kobo: number;
+        paystack_reference: string;
+        created_at: string;
+      }>();
+
+    const salesRes = await env.DB.prepare(
+      `SELECT id, product_id, product_title, product_type, buyer_email, amount_kobo, commission_kobo, net_kobo, paystack_reference, created_at
+       FROM product_sales WHERE seller_id = ? ORDER BY created_at DESC LIMIT 100`
+    )
+      .bind(user.id)
+      .all<{
+        id: string;
+        product_id: string;
+        product_title: string;
+        product_type: string;
+        buyer_email: string;
+        amount_kobo: number;
+        commission_kobo: number;
+        net_kobo: number;
+        paystack_reference: string;
+        created_at: string;
+      }>();
+
+    const tipAgg = await env.DB.prepare(
+      'SELECT COALESCE(SUM(net_kobo), 0) as total_net FROM tips WHERE to_user_id = ?'
+    )
+      .bind(user.id)
+      .first<{ total_net: number }>();
+
+    const storeAgg = await env.DB.prepare(
+      'SELECT COALESCE(SUM(net_kobo), 0) as total_net FROM product_sales WHERE seller_id = ?'
+    )
+      .bind(user.id)
+      .first<{ total_net: number }>();
 
     const payoutsRes = await env.DB.prepare(
       'SELECT id, bank_name, account_number, account_name, amount_kobo, paid_at FROM payouts WHERE user_id = ? ORDER BY paid_at DESC LIMIT 30'
@@ -1109,8 +1572,22 @@ export async function handleApiRequest(req: Request, env: EnvBindings): Promise<
     return jsonResponse({
       pendingBalanceKobo: user.pending_balance_kobo,
       totalEarningsKobo: user.total_earnings_kobo,
+      tipEarningsKobo: Number(tipAgg?.total_net ?? 0),
+      storeEarningsKobo: Number(storeAgg?.total_net ?? 0),
       payoutRequestedAt: user.payout_requested_at,
       tips: tipsRes.results,
+      productSales: salesRes.results.map((s) => ({
+        id: s.id,
+        product_id: s.product_id,
+        product_title: s.product_title,
+        product_type: s.product_type,
+        buyer_email_masked: maskEmail(s.buyer_email),
+        amount_kobo: Number(s.amount_kobo),
+        commission_kobo: Number(s.commission_kobo),
+        net_kobo: Number(s.net_kobo),
+        paystack_reference: s.paystack_reference,
+        created_at: s.created_at,
+      })),
       payouts: payoutsRes.results,
     });
   }
@@ -1167,11 +1644,26 @@ export async function handleApiRequest(req: Request, env: EnvBindings): Promise<
       .bind(user.id)
       .all<{ id: string; title: string; url: string; platform: string; position: number; clicks: number }>();
 
-    // Enforce Free limits on public page: max 5 links, only light/dark themes, max 1 music embed, watermark visible
+    // CRITICAL: NEVER select external_url on public profile endpoint!
+    // Enforce Free limits: max 5 links, max 3 oldest active products, 2 ugly free themes, max 1 music embed, watermark visible
+    const productsRes = await env.DB.prepare(
+      'SELECT id, title, description, price_kobo, product_type, cover_url, sales_count, created_at FROM products WHERE user_id = ? AND is_active = 1 ORDER BY created_at ASC'
+    )
+      .bind(user.id)
+      .all<{
+        id: string;
+        title: string;
+        description: string;
+        price_kobo: number;
+        product_type: string;
+        cover_url: string;
+        sales_count: number;
+        created_at: string;
+      }>();
+
     const visibleLinks = activePro ? linksRes.results : linksRes.results.slice(0, 5);
-    const savedTheme = (user.theme as ThemeId) || 'light';
-    const effectiveTheme: ThemeId =
-      activePro || !THEMES[savedTheme]?.proOnly ? (THEMES[savedTheme] ? savedTheme : 'light') : 'light';
+    const visibleProducts = activePro ? productsRes.results : productsRes.results.slice(0, 3);
+    const effectiveTheme = resolveThemeId(user.theme, activePro);
 
     const youtubeUrl = user.youtube_url || '';
     const spotifyUrl = activePro ? user.spotify_url || '' : youtubeUrl ? '' : user.spotify_url || '';
@@ -1193,6 +1685,15 @@ export async function handleApiRequest(req: Request, env: EnvBindings): Promise<
         show_watermark: !activePro,
       },
       links: visibleLinks,
+      products: visibleProducts.map((p) => ({
+        id: p.id,
+        title: p.title,
+        description: p.description,
+        price_kobo: Number(p.price_kobo),
+        product_type: p.product_type,
+        cover_url: p.cover_url,
+        sales_count: Number(p.sales_count || 0),
+      })),
     });
   }
 
@@ -1280,6 +1781,12 @@ export async function handleApiRequest(req: Request, env: EnvBindings): Promise<
     if (dupPro) {
       return jsonResponse({ error: 'This payment reference has already been processed.' }, 409);
     }
+    const dupSale = await env.DB.prepare('SELECT id FROM product_sales WHERE paystack_reference = ?')
+      .bind(reference)
+      .first();
+    if (dupSale) {
+      return jsonResponse({ error: 'This payment reference has already been processed.' }, 409);
+    }
 
     const verification = await verifyPaystackTransaction(reference, secretKey);
     if (!verification.ok || !verification.amountKobo || verification.amountKobo < 10000) {
@@ -1356,6 +1863,12 @@ export async function handleApiRequest(req: Request, env: EnvBindings): Promise<
     if (dupTip) {
       return jsonResponse({ error: 'This payment reference has already been processed.' }, 409);
     }
+    const dupSale = await env.DB.prepare('SELECT id FROM product_sales WHERE paystack_reference = ?')
+      .bind(reference)
+      .first();
+    if (dupSale) {
+      return jsonResponse({ error: 'This payment reference has already been processed.' }, 409);
+    }
 
     const expectedKobo = proPriceNgn * 100;
     const verification = await verifyPaystackTransaction(reference, secretKey);
@@ -1380,6 +1893,118 @@ export async function handleApiRequest(req: Request, env: EnvBindings): Promise<
       user: result.user ? sanitizeUser(result.user) : null,
       pro_expires_at: result.expiresAt,
       alreadyRecorded: result.status === 'already_credited',
+    });
+  }
+
+  // Verify Paystack Digital Store Purchase (Reveals external_url / embed ONLY after confirmed payment)
+  if (method === 'POST' && path === '/api/payments/verify-product') {
+    const secretKey = (env.PAYSTACK_SECRET_KEY || '').trim();
+    const publicKey = (env.PAYSTACK_PUBLIC_KEY || '').trim();
+    if (!secretKey) {
+      return jsonResponse({ error: 'Paystack secret key is not configured on the server.' }, 500);
+    }
+    const pkMode = getPaystackKeyMode(publicKey);
+    const skMode = getPaystackKeyMode(secretKey);
+    if (pkMode && skMode && pkMode !== skMode) {
+      return jsonResponse(
+        {
+          error: `Paystack key mismatch: Public Key is ${pkMode.toUpperCase()} while Secret Key is ${skMode.toUpperCase()}. Update both keys in Cloudflare Environment Variables.`,
+        },
+        500
+      );
+    }
+
+    const body = await parseJsonBody<{
+      reference?: string;
+      productId?: string;
+      buyerEmail?: string;
+    }>(req);
+    const reference = (body?.reference || '').trim();
+    const productId = (body?.productId || '').trim();
+    const buyerEmail = (body?.buyerEmail || '').trim().slice(0, 120);
+
+    if (!reference || !productId) {
+      return jsonResponse({ error: 'Payment reference and productId are required.' }, 400);
+    }
+
+    const product = await env.DB.prepare('SELECT * FROM products WHERE id = ?').bind(productId).first<ProductRow>();
+    if (!product) {
+      return jsonResponse({ error: 'Product not found.' }, 404);
+    }
+    const seller = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(product.user_id).first<UserRow>();
+    if (!seller || seller.is_blocked === 1) {
+      return jsonResponse({ error: 'Seller account is unavailable.' }, 404);
+    }
+
+    const existingSale = await env.DB.prepare(
+      'SELECT product_id, amount_kobo, commission_kobo, net_kobo FROM product_sales WHERE paystack_reference = ?'
+    )
+      .bind(reference)
+      .first<{ product_id: string; amount_kobo: number; commission_kobo: number; net_kobo: number }>();
+
+    if (existingSale) {
+      if (existingSale.product_id === product.id) {
+        const embed = parseProductEmbed(product.product_type as ProductType, product.external_url);
+        return jsonResponse({
+          verified: true,
+          reference,
+          amountKobo: Number(existingSale.amount_kobo),
+          commissionKobo: Number(existingSale.commission_kobo),
+          netKobo: Number(existingSale.net_kobo),
+          alreadyRecorded: true,
+          delivery: {
+            productId: product.id,
+            title: product.title,
+            productType: product.product_type,
+            externalUrl: product.external_url,
+            embed,
+          },
+        });
+      }
+      return jsonResponse({ error: 'This payment reference has already been processed.' }, 409);
+    }
+
+    const dupTip = await env.DB.prepare('SELECT id FROM tips WHERE paystack_reference = ?').bind(reference).first();
+    const dupPro = await env.DB.prepare('SELECT id FROM pro_payments WHERE paystack_reference = ?').bind(reference).first();
+    if (dupTip || dupPro) {
+      return jsonResponse({ error: 'This payment reference has already been processed.' }, 409);
+    }
+
+    const verification = await verifyPaystackTransaction(reference, secretKey);
+    if (!verification.ok || !verification.amountKobo || verification.amountKobo < Number(product.price_kobo)) {
+      return jsonResponse(
+        { error: verification.error || 'Could not verify full product payment with Paystack.' },
+        400
+      );
+    }
+
+    const result = await recordVerifiedProductSale(env.DB, {
+      product,
+      seller,
+      reference,
+      amountKobo: verification.amountKobo,
+      buyerEmail,
+    });
+
+    if (result.status === 'conflict') {
+      return jsonResponse({ error: 'This payment reference has already been processed.' }, 409);
+    }
+
+    const embed = parseProductEmbed(product.product_type as ProductType, product.external_url);
+    return jsonResponse({
+      verified: true,
+      reference,
+      amountKobo: result.amountKobo,
+      commissionKobo: result.commissionKobo,
+      netKobo: result.netKobo,
+      alreadyRecorded: result.status === 'already_credited',
+      delivery: {
+        productId: product.id,
+        title: product.title,
+        productType: product.product_type,
+        externalUrl: product.external_url,
+        embed,
+      },
     });
   }
 
@@ -1438,7 +2063,29 @@ export async function handleApiRequest(req: Request, env: EnvBindings): Promise<
 
     const metaType = String(meta.type || '').trim();
 
-    if (metaType === 'tip' && amountKobo >= 10000) {
+    if (metaType === 'product_sale' || reference.toLowerCase().startsWith('prod_')) {
+      const productId = String(meta.product_id || '').trim();
+      if (productId) {
+        const product = await env.DB.prepare('SELECT * FROM products WHERE id = ?')
+          .bind(productId)
+          .first<ProductRow>();
+        if (product && amountKobo >= Number(product.price_kobo)) {
+          const seller = await env.DB.prepare('SELECT * FROM users WHERE id = ?')
+            .bind(product.user_id)
+            .first<UserRow>();
+          if (seller && seller.is_blocked !== 1) {
+            const buyerEmail = String(meta.buyer_email || tx.customer?.email || '').trim().slice(0, 120);
+            await recordVerifiedProductSale(env.DB, {
+              product,
+              seller,
+              reference,
+              amountKobo,
+              buyerEmail,
+            });
+          }
+        }
+      }
+    } else if (metaType === 'tip' && amountKobo >= 10000) {
       const toUsername = String(meta.to_username || '').trim().toLowerCase();
       if (toUsername) {
         const creator = await env.DB.prepare('SELECT * FROM users WHERE username = ?')
@@ -1559,6 +2206,33 @@ export async function handleApiRequest(req: Request, env: EnvBindings): Promise<
 
       const payoutsRes = await env.DB.prepare('SELECT * FROM payouts ORDER BY paid_at DESC LIMIT 200').all();
 
+      const prodAgg = await env.DB.prepare(
+        'SELECT COUNT(*) as total_products, COALESCE(SUM(is_active), 0) as active_products FROM products'
+      ).first<{ total_products: number; active_products: number }>();
+
+      const salesAgg = await env.DB.prepare(
+        'SELECT COUNT(*) as total_sales, COALESCE(SUM(amount_kobo), 0) as total_revenue, COALESCE(SUM(commission_kobo), 0) as total_commission FROM product_sales'
+      ).first<{ total_sales: number; total_revenue: number; total_commission: number }>();
+
+      // CRITICAL PRIVACY: Admin sales table uses masked buyer email and NEVER queries/returns external_url!
+      const recentSalesRes = await env.DB.prepare(
+        `SELECT id, product_id, product_title, product_type, seller_username, buyer_email,
+                amount_kobo, commission_kobo, net_kobo, paystack_reference, created_at
+         FROM product_sales ORDER BY created_at DESC LIMIT 200`
+      ).all<{
+        id: string;
+        product_id: string;
+        product_title: string;
+        product_type: string;
+        seller_username: string;
+        buyer_email: string;
+        amount_kobo: number;
+        commission_kobo: number;
+        net_kobo: number;
+        paystack_reference: string;
+        created_at: string;
+      }>();
+
       const totalUsers = users.length;
       const proUsers = users.filter((u) => u.is_pro).length;
       const freeUsers = totalUsers - proUsers;
@@ -1566,6 +2240,15 @@ export async function handleApiRequest(req: Request, env: EnvBindings): Promise<
       const totalCommissionKobo = tipsRes.results.reduce((s, t) => s + Number(t.commission_kobo || 0), 0);
       const totalPendingPayoutKobo = users.reduce((s, u) => s + Number(u.pending_balance_kobo || 0), 0);
       const totalProRevenueKobo = proRes.results.reduce((s, p) => s + Number(p.amount_kobo || 0), 0);
+
+      let freeThemeUsers = 0;
+      let premiumThemeUsers = 0;
+      const themeCounts: Record<string, number> = {};
+      for (const u of users) {
+        themeCounts[u.theme] = (themeCounts[u.theme] || 0) + 1;
+        if (isPremiumTheme(u.theme)) premiumThemeUsers += 1;
+        else freeThemeUsers += 1;
+      }
 
       const payoutQueue = users.filter((u) => u.pending_balance_kobo > 0);
 
@@ -1580,6 +2263,29 @@ export async function handleApiRequest(req: Request, env: EnvBindings): Promise<
           totalProRevenueKobo,
           totalProPaymentsCount: proRes.results.length,
         },
+        storeStats: {
+          totalProducts: Number(prodAgg?.total_products ?? 0),
+          activeProducts: Number(prodAgg?.active_products ?? 0),
+          totalSales: Number(salesAgg?.total_sales ?? 0),
+          totalStoreRevenueKobo: Number(salesAgg?.total_revenue ?? 0),
+          totalStoreCommissionKobo: Number(salesAgg?.total_commission ?? 0),
+          freeThemeUsers,
+          premiumThemeUsers,
+          themeCounts,
+        },
+        recentProductSales: recentSalesRes.results.map((s) => ({
+          id: s.id,
+          product_id: s.product_id,
+          product_title: s.product_title,
+          product_type: s.product_type,
+          seller_username: s.seller_username,
+          buyer_email_masked: maskEmail(s.buyer_email),
+          amount_kobo: Number(s.amount_kobo),
+          commission_kobo: Number(s.commission_kobo),
+          net_kobo: Number(s.net_kobo),
+          paystack_reference: s.paystack_reference,
+          created_at: s.created_at,
+        })),
         users,
         tips: tipsRes.results,
         proPayments: proRes.results,
@@ -1604,6 +2310,7 @@ export async function handleApiRequest(req: Request, env: EnvBindings): Promise<
     if (method === 'DELETE' && delUserMatch) {
       const userId = delUserMatch[1];
       await env.DB.prepare('DELETE FROM links WHERE user_id = ?').bind(userId).run();
+      await env.DB.prepare('DELETE FROM products WHERE user_id = ?').bind(userId).run();
       await env.DB.prepare('DELETE FROM page_views WHERE user_id = ?').bind(userId).run();
       await env.DB.prepare('DELETE FROM link_clicks WHERE user_id = ?').bind(userId).run();
       await env.DB.prepare('DELETE FROM users WHERE id = ?').bind(userId).run();

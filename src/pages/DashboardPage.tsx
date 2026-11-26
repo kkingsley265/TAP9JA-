@@ -10,16 +10,19 @@ import {
   HeartHandshake,
   Link2,
   Loader2,
+  Lock,
   LogOut,
   Pencil,
   Plus,
   QrCode,
+  ShoppingBag,
+  Sparkles,
   Trash2,
   UserCog,
   Wallet,
   Zap,
 } from 'lucide-react';
-import { useCallback, useEffect, useState, type DragEvent, type FormEvent } from 'react';
+import { useCallback, useEffect, useMemo, useState, type DragEvent, type FormEvent } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { ClicksBarChart, ViewsLineChart } from '../components/AnalyticsCharts';
 import { Avatar } from '../components/Avatar';
@@ -33,18 +36,25 @@ import {
   openPaystackPopup,
   setUserToken,
   type CreatorLink,
+  type CreatorProduct,
+  type PlanNotice,
+  type ProductSaleRecord,
   type PublicConfig,
   type UserProfile,
 } from '../lib/api';
 import {
   detectPlatform,
   formatNairaFromKobo,
+  FREE_THEME_IDS,
   NIGERIAN_BANKS,
+  PRO_THEME_IDS,
+  PRODUCT_TYPES,
   THEMES,
+  type ProductType,
   type ThemeId,
 } from '../shared/platforms';
 
-type TabId = 'links' | 'profile' | 'analytics' | 'tips' | 'pro';
+type TabId = 'links' | 'store' | 'profile' | 'analytics' | 'tips' | 'pro';
 
 interface AnalyticsPayload {
   summary: {
@@ -63,6 +73,8 @@ interface AnalyticsPayload {
 interface TipsPayload {
   pendingBalanceKobo: number;
   totalEarningsKobo: number;
+  tipEarningsKobo: number;
+  storeEarningsKobo: number;
   payoutRequestedAt: string | null;
   tips: Array<{
     id: string;
@@ -74,6 +86,7 @@ interface TipsPayload {
     paystack_reference: string;
     created_at: string;
   }>;
+  productSales: ProductSaleRecord[];
   payouts: Array<{
     id: string;
     bank_name: string;
@@ -89,6 +102,7 @@ export default function DashboardPage() {
   const [activeTab, setActiveTab] = useState<TabId>('links');
   const [user, setUser] = useState<UserProfile | null>(null);
   const [links, setLinks] = useState<CreatorLink[]>([]);
+  const [planNotice, setPlanNotice] = useState<PlanNotice | null>(null);
   const [config, setConfig] = useState<PublicConfig | null>(null);
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
@@ -104,6 +118,18 @@ export default function DashboardPage() {
   const [editUrl, setEditUrl] = useState('');
   const [draggedId, setDraggedId] = useState<string | null>(null);
 
+  // Store state
+  const [products, setProducts] = useState<CreatorProduct[]>([]);
+  const [loadingProducts, setLoadingProducts] = useState(false);
+  const [editingProductId, setEditingProductId] = useState<string | null>(null);
+  const [prodTitle, setProdTitle] = useState('');
+  const [prodDesc, setProdDesc] = useState('');
+  const [prodPrice, setProdPrice] = useState('2500');
+  const [prodType, setProdType] = useState<ProductType>('video');
+  const [prodCoverUrl, setProdCoverUrl] = useState('');
+  const [prodExternalUrl, setProdExternalUrl] = useState('');
+  const [savingProduct, setSavingProduct] = useState(false);
+
   // Profile form state
   const [pName, setPName] = useState('');
   const [pBio, setPBio] = useState('');
@@ -111,15 +137,17 @@ export default function DashboardPage() {
   const [pYoutube, setPYoutube] = useState('');
   const [pSpotify, setPSpotify] = useState('');
   const [pWhatsapp, setPWhatsapp] = useState('');
-  const [pTheme, setPTheme] = useState<ThemeId>('light');
+  const [pTheme, setPTheme] = useState<ThemeId>('free_theme_1');
+  const [lockedThemeUpsell, setLockedThemeUpsell] = useState(false);
   const [pBankCode, setPBankCode] = useState('');
   const [pAccountNumber, setPAccountNumber] = useState('');
   const [pAccountName, setPAccountName] = useState('');
   const [savingProfile, setSavingProfile] = useState(false);
 
-  // Analytics & Tips state
+  // Analytics & Earnings state
   const [analytics, setAnalytics] = useState<AnalyticsPayload | null>(null);
   const [tipsData, setTipsData] = useState<TipsPayload | null>(null);
+  const [earningsFilter, setEarningsFilter] = useState<'all' | 'tips' | 'store'>('all');
   const [requestingPayout, setRequestingPayout] = useState(false);
   const [upgradingPro, setUpgradingPro] = useState(false);
 
@@ -129,7 +157,7 @@ export default function DashboardPage() {
 
   const showToast = (type: 'success' | 'error', text: string) => {
     setToast({ type, text });
-    setTimeout(() => setToast(null), 4200);
+    setTimeout(() => setToast(null), 4500);
   };
 
   const syncFormFromUser = (u: UserProfile) => {
@@ -139,7 +167,7 @@ export default function DashboardPage() {
     setPYoutube(u.youtube_url || '');
     setPSpotify(u.spotify_url || '');
     setPWhatsapp(u.whatsapp_number || '');
-    setPTheme((u.theme as ThemeId) || 'light');
+    setPTheme((u.theme as ThemeId) || 'free_theme_1');
     setPBankCode(u.bank_code || '');
     setPAccountNumber(u.account_number || '');
     setPAccountName(u.account_name || '');
@@ -152,11 +180,12 @@ export default function DashboardPage() {
     }
     try {
       const [meRes, cfgRes] = await Promise.all([
-        apiFetch<{ user: UserProfile; links: CreatorLink[] }>('/api/me'),
+        apiFetch<{ user: UserProfile; links: CreatorLink[]; planNotice?: PlanNotice }>('/api/me'),
         apiFetch<PublicConfig>('/api/config', { authMode: 'none' }),
       ]);
       setUser(meRes.user);
       setLinks(meRes.links);
+      setPlanNotice(meRes.planNotice || null);
       setConfig(cfgRes);
       syncFormFromUser(meRes.user);
     } catch {
@@ -166,6 +195,18 @@ export default function DashboardPage() {
       setLoading(false);
     }
   }, [navigate]);
+
+  const loadProducts = useCallback(async () => {
+    setLoadingProducts(true);
+    try {
+      const res = await apiFetch<{ products: CreatorProduct[] }>('/api/products');
+      setProducts(res.products || []);
+    } catch {
+      // ignore load failure
+    } finally {
+      setLoadingProducts(false);
+    }
+  }, []);
 
   useEffect(() => {
     loadAccount();
@@ -181,8 +222,10 @@ export default function DashboardPage() {
       apiFetch<TipsPayload>('/api/tips')
         .then(setTipsData)
         .catch(() => {});
+    } else if (activeTab === 'store') {
+      loadProducts();
     }
-  }, [activeTab, user]);
+  }, [activeTab, user, loadProducts]);
 
   useEffect(() => {
     if (!user || user.is_pro) {
@@ -460,6 +503,129 @@ export default function DashboardPage() {
     });
   };
 
+  // Store CRUD handlers
+  const activeProductsCount = products.filter((p) => p.is_active).length;
+  const freeProductLimitReached = Boolean(user && !user.is_pro && activeProductsCount >= 3);
+
+  const resetProductForm = () => {
+    setEditingProductId(null);
+    setProdTitle('');
+    setProdDesc('');
+    setProdPrice('2500');
+    setProdType('video');
+    setProdCoverUrl('');
+    setProdExternalUrl('');
+  };
+
+  const handleSaveProduct = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!editingProductId && freeProductLimitReached) {
+      showToast('error', 'Free plan limited to 3 active products — Upgrade to Pro ₦1,000/month for unlimited.');
+      return;
+    }
+    setSavingProduct(true);
+    try {
+      if (editingProductId) {
+        const res = await apiFetch<{ product: CreatorProduct }>(`/api/products/${editingProductId}`, {
+          method: 'PUT',
+          body: JSON.stringify({
+            title: prodTitle.trim(),
+            description: prodDesc.trim(),
+            price_ngn: Number(prodPrice),
+            product_type: prodType,
+            cover_url: prodCoverUrl.trim(),
+            external_url: prodExternalUrl.trim(),
+          }),
+        });
+        setProducts((prev) => prev.map((p) => (p.id === editingProductId ? res.product : p)));
+        resetProductForm();
+        showToast('success', 'Product updated on your store.');
+      } else {
+        const res = await apiFetch<{ product: CreatorProduct }>('/api/products', {
+          method: 'POST',
+          body: JSON.stringify({
+            title: prodTitle.trim(),
+            description: prodDesc.trim(),
+            price_ngn: Number(prodPrice),
+            product_type: prodType,
+            cover_url: prodCoverUrl.trim(),
+            external_url: prodExternalUrl.trim(),
+          }),
+        });
+        setProducts((prev) => [...prev, res.product]);
+        resetProductForm();
+        showToast('success', 'Product published! Buyers get instant access after Paystack payment.');
+      }
+    } catch (err) {
+      showToast('error', err instanceof Error ? err.message : 'Could not save product.');
+    } finally {
+      setSavingProduct(false);
+    }
+  };
+
+  const handleToggleProduct = async (prod: CreatorProduct) => {
+    try {
+      const res = await apiFetch<{ product: CreatorProduct }>(`/api/products/${prod.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({ is_active: !prod.is_active }),
+      });
+      setProducts((prev) => prev.map((p) => (p.id === prod.id ? res.product : p)));
+    } catch (err) {
+      showToast('error', err instanceof Error ? err.message : 'Could not update product status.');
+    }
+  };
+
+  const handleDeleteProduct = async (productId: string) => {
+    try {
+      await apiFetch(`/api/products/${productId}`, { method: 'DELETE' });
+      setProducts((prev) => prev.filter((p) => p.id !== productId));
+      if (editingProductId === productId) resetProductForm();
+      showToast('success', 'Product removed.');
+    } catch (err) {
+      showToast('error', err instanceof Error ? err.message : 'Could not delete product.');
+    }
+  };
+
+  const startEditProduct = (prod: CreatorProduct) => {
+    setEditingProductId(prod.id);
+    setProdTitle(prod.title);
+    setProdDesc(prod.description || '');
+    setProdPrice(String(Math.round(prod.price_kobo / 100)));
+    setProdType(prod.product_type);
+    setProdCoverUrl(prod.cover_url || '');
+    setProdExternalUrl(prod.external_url || '');
+  };
+
+  // Unified Earnings combined list
+  const unifiedEarningsRows = useMemo(() => {
+    if (!tipsData) return [];
+    const tipRows = (tipsData.tips || []).map((t) => ({
+      id: `tip_${t.id}`,
+      kind: 'tip' as const,
+      title: `Tip from ${t.from_name}`,
+      subtitle: t.message || 'Supporter Tip Jar',
+      amount_kobo: t.amount_kobo,
+      net_kobo: t.net_kobo,
+      created_at: t.created_at,
+    }));
+    const saleRows = (tipsData.productSales || []).map((s) => ({
+      id: `sale_${s.id}`,
+      kind: 'store' as const,
+      title: s.product_title,
+      subtitle: `${PRODUCT_TYPES[s.product_type]?.shortLabel || 'Product'} · ${s.buyer_email_masked}`,
+      amount_kobo: s.amount_kobo,
+      net_kobo: s.net_kobo,
+      created_at: s.created_at,
+    }));
+    const combined =
+      earningsFilter === 'tips'
+        ? tipRows
+        : earningsFilter === 'store'
+          ? saleRows
+          : [...tipRows, ...saleRows];
+    return combined.sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at));
+  }, [tipsData, earningsFilter]);
+
   if (loading || !user) {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center">
@@ -470,9 +636,10 @@ export default function DashboardPage() {
 
   const navItems: Array<{ id: TabId; label: string; icon: typeof Link2 }> = [
     { id: 'links', label: 'Manage Links', icon: Link2 },
+    { id: 'store', label: 'Store', icon: ShoppingBag },
     { id: 'profile', label: 'Edit Profile', icon: UserCog },
     { id: 'analytics', label: 'Analytics', icon: BarChart3 },
-    { id: 'tips', label: 'Tips & Earnings', icon: Wallet },
+    { id: 'tips', label: 'Earnings', icon: Wallet },
     { id: 'pro', label: 'Upgrade to Pro', icon: Crown },
   ];
 
@@ -481,6 +648,15 @@ export default function DashboardPage() {
     user.is_pro && user.pro_expires_at
       ? Math.max(0, Math.ceil((new Date(user.pro_expires_at).getTime() - Date.now()) / (1000 * 60 * 60 * 24)))
       : 0;
+  const showProExpiredBanner =
+    !user.is_pro &&
+    Boolean(
+      planNotice &&
+        (planNotice.hadExpiredPro ||
+          planNotice.hiddenProductsCount > 0 ||
+          planNotice.hiddenLinksCount > 0 ||
+          planNotice.revertedTheme)
+    );
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col lg:flex-row">
@@ -640,6 +816,30 @@ export default function DashboardPage() {
 
         {/* Active Tab Viewport */}
         <main className="flex-1 p-4 sm:p-6 lg:p-8 max-w-5xl w-full mx-auto space-y-6">
+          {/* Pro Expired Notice Banner */}
+          {showProExpiredBanner && planNotice && (
+            <div className="rounded-3xl bg-gradient-to-r from-amber-500/15 via-purple-600/10 to-emerald-500/15 border border-amber-400/50 p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div className="space-y-1">
+                <p className="text-sm font-display font-bold text-slate-950">
+                  Pro expired — {planNotice.hiddenProductsCount} products
+                  {planNotice.hiddenLinksCount > 0 ? `, ${planNotice.hiddenLinksCount} links` : ''} and themes hidden,
+                  renew ₦1,000 to bring them back
+                </p>
+                <p className="text-xs text-slate-600">
+                  Nothing was deleted. Renew your 30-day Pro plan to instantly restore all hidden store products, links,
+                  and premium themes.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setActiveTab('pro')}
+                className="h-10 px-5 rounded-2xl bg-gradient-to-r from-emerald-600 to-purple-700 text-white text-xs font-bold whitespace-nowrap shrink-0"
+              >
+                Renew Pro ₦1,000
+              </button>
+            </div>
+          )}
+
           {/* TAB 1: MANAGE LINKS */}
           {activeTab === 'links' && (
             <div className="space-y-6">
@@ -870,6 +1070,284 @@ export default function DashboardPage() {
             </div>
           )}
 
+          {/* TAB 1B: DIGITAL STORE */}
+          {activeTab === 'store' && (
+            <div className="space-y-6">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div>
+                  <h1 className="text-2xl font-display font-bold text-slate-950">TAP9JA Digital Store</h1>
+                  <p className="text-sm text-slate-600">
+                    Sell videos, beats, ebooks, Canva/Notion templates, or VIP groups via external links — 90% is yours.
+                  </p>
+                </div>
+                <span className="text-xs font-mono-nums font-semibold text-slate-600">
+                  {activeProductsCount} / {user.is_pro ? 'Unlimited' : '3'} active products
+                </span>
+              </div>
+
+              {freeProductLimitReached && !editingProductId && (
+                <div className="rounded-3xl bg-gradient-to-r from-emerald-950 to-purple-950 text-white p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                  <div>
+                    <p className="font-display font-bold text-base">
+                      Free plan limited to 3 active products — Upgrade to Pro ₦1,000/month for unlimited
+                    </p>
+                    <p className="text-xs text-slate-300 mt-1">
+                      Unlock unlimited Store products, all 5 luxury storefront themes, zero ads, and blue verified tick.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('pro')}
+                    className="h-11 px-5 rounded-2xl bg-gradient-to-r from-emerald-500 to-purple-600 text-white text-xs font-semibold whitespace-nowrap shrink-0"
+                  >
+                    Upgrade to Pro
+                  </button>
+                </div>
+              )}
+
+              {products.length === 0 && !loadingProducts && (
+                <div className="rounded-3xl bg-gradient-to-br from-emerald-950 via-slate-950 to-purple-950 text-white p-7 sm:p-8 border border-emerald-500/25">
+                  <div className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-400/15 border border-emerald-400/30 px-3 py-1 text-xs font-semibold text-emerald-300 mb-3">
+                    <Sparkles className="h-3.5 w-3.5" />
+                    <span>Zero File Upload · Instant Paystack Delivery</span>
+                  </div>
+                  <h2 className="text-xl sm:text-2xl font-display font-extrabold">
+                    Turn anything into cash — 90% is yours
+                  </h2>
+                  <p className="text-sm text-slate-300 mt-2 max-w-2xl">
+                    Paste your unlisted YouTube course, Loom tutorial, Google Drive PDF, Spotify/Audiomack link, or private
+                    Telegram/WhatsApp invite link. Buyers only unlock the link after Paystack verifies payment.
+                  </p>
+                </div>
+              )}
+
+              {/* Add / Edit Product Form */}
+              <form
+                onSubmit={handleSaveProduct}
+                className="rounded-3xl bg-white border border-slate-200 p-5 sm:p-6 space-y-4"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <h2 className="text-base font-display font-bold text-slate-900">
+                    {editingProductId ? 'Edit Digital Product' : 'Add New Product'}
+                  </h2>
+                  {editingProductId && (
+                    <button
+                      type="button"
+                      onClick={resetProductForm}
+                      className="text-xs font-semibold text-slate-500 hover:text-slate-900"
+                    >
+                      Cancel edit
+                    </button>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-12 gap-4">
+                  <div className="sm:col-span-6">
+                    <label htmlFor="prod-title" className="block text-xs font-semibold text-slate-700 mb-1.5">
+                      Product Title (max 60 chars)
+                    </label>
+                    <input
+                      id="prod-title"
+                      type="text"
+                      required
+                      maxLength={60}
+                      disabled={!editingProductId && freeProductLimitReached}
+                      value={prodTitle}
+                      onChange={(e) => setProdTitle(e.target.value)}
+                      placeholder="e.g. Afrobeats Drum Kit Vol. 1"
+                      className="w-full h-11 px-4 rounded-2xl border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/30 disabled:bg-slate-100"
+                    />
+                  </div>
+
+                  <div className="sm:col-span-3">
+                    <label htmlFor="prod-type" className="block text-xs font-semibold text-slate-700 mb-1.5">
+                      Type
+                    </label>
+                    <select
+                      id="prod-type"
+                      disabled={!editingProductId && freeProductLimitReached}
+                      value={prodType}
+                      onChange={(e) => setProdType(e.target.value as ProductType)}
+                      className="w-full h-11 px-3 rounded-2xl border border-slate-200 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-emerald-500/30 disabled:bg-slate-100"
+                    >
+                      {(Object.values(PRODUCT_TYPES) as Array<(typeof PRODUCT_TYPES)[ProductType]>).map((pt) => (
+                        <option key={pt.id} value={pt.id}>
+                          {pt.shortLabel}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div className="sm:col-span-3">
+                    <label htmlFor="prod-price" className="block text-xs font-semibold text-slate-700 mb-1.5">
+                      Price (₦200 – ₦50,000)
+                    </label>
+                    <input
+                      id="prod-price"
+                      type="number"
+                      required
+                      min={200}
+                      max={50000}
+                      disabled={!editingProductId && freeProductLimitReached}
+                      value={prodPrice}
+                      onChange={(e) => setProdPrice(e.target.value)}
+                      className="w-full h-11 px-4 rounded-2xl border border-slate-200 text-sm font-mono-nums focus:outline-none focus:ring-2 focus:ring-emerald-500/30 disabled:bg-slate-100"
+                    />
+                  </div>
+                </div>
+
+                <div>
+                  <label htmlFor="prod-desc" className="block text-xs font-semibold text-slate-700 mb-1.5">
+                    Description (max 300 chars)
+                  </label>
+                  <textarea
+                    id="prod-desc"
+                    rows={2}
+                    maxLength={300}
+                    disabled={!editingProductId && freeProductLimitReached}
+                    value={prodDesc}
+                    onChange={(e) => setProdDesc(e.target.value)}
+                    placeholder="What buyers get immediately after payment..."
+                    className="w-full px-4 py-2.5 rounded-2xl border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/30 resize-none disabled:bg-slate-100"
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                  <div>
+                    <label htmlFor="prod-cover" className="block text-xs font-semibold text-slate-700 mb-1.5">
+                      Cover Image URL (optional, no upload)
+                    </label>
+                    <input
+                      id="prod-cover"
+                      type="url"
+                      disabled={!editingProductId && freeProductLimitReached}
+                      value={prodCoverUrl}
+                      onChange={(e) => setProdCoverUrl(e.target.value)}
+                      placeholder="https://i.ibb.co/..."
+                      className="w-full h-11 px-4 rounded-2xl border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/30 disabled:bg-slate-100"
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="prod-link" className="block text-xs font-semibold text-slate-700 mb-1.5">
+                      Delivery Link (secret until verified payment)
+                    </label>
+                    <input
+                      id="prod-link"
+                      type="text"
+                      required
+                      disabled={!editingProductId && freeProductLimitReached}
+                      value={prodExternalUrl}
+                      onChange={(e) => setProdExternalUrl(e.target.value)}
+                      placeholder={PRODUCT_TYPES[prodType]?.placeholderUrl}
+                      className="w-full h-11 px-4 rounded-2xl border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/30 disabled:bg-slate-100"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex justify-end">
+                  <button
+                    type="submit"
+                    disabled={savingProduct || (!editingProductId && freeProductLimitReached)}
+                    className="h-11 px-6 rounded-2xl bg-gradient-to-r from-emerald-600 to-purple-700 text-white text-sm font-semibold hover:opacity-95 transition-opacity inline-flex items-center gap-2 disabled:opacity-45"
+                  >
+                    {savingProduct ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+                    <span>{editingProductId ? 'Update Product' : 'Publish Product'}</span>
+                  </button>
+                </div>
+              </form>
+
+              {/* Seller Products List */}
+              <div className="space-y-3">
+                {loadingProducts ? (
+                  <div className="rounded-3xl bg-white border border-slate-200 p-8 flex justify-center">
+                    <Loader2 className="h-6 w-6 animate-spin text-emerald-600" />
+                  </div>
+                ) : products.length === 0 ? null : (
+                  products.map((prod, idx) => {
+                    const typeMeta = PRODUCT_TYPES[prod.product_type] || PRODUCT_TYPES.file;
+                    const activeIndex = products.filter((p, i) => i <= idx && p.is_active).length;
+                    const hiddenOnExpiredFree = !user.is_pro && prod.is_active && activeIndex > 3;
+                    return (
+                      <div
+                        key={prod.id}
+                        className="rounded-3xl bg-white border border-slate-200 p-4 sm:p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4"
+                      >
+                        <div className="flex items-start gap-3.5 min-w-0">
+                          {prod.cover_url ? (
+                            <img
+                              src={prod.cover_url}
+                              alt={prod.title}
+                              className="h-14 w-14 rounded-2xl object-cover border border-slate-200 shrink-0"
+                            />
+                          ) : (
+                            <div className="h-14 w-14 rounded-2xl bg-emerald-50 border border-emerald-200 text-emerald-700 flex items-center justify-center shrink-0">
+                              <ShoppingBag className="h-6 w-6" />
+                            </div>
+                          )}
+                          <div className="min-w-0 space-y-1">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="px-2 py-0.5 rounded-md bg-slate-100 text-slate-700 text-[10px] font-bold uppercase">
+                                {typeMeta.shortLabel}
+                              </span>
+                              <span className="text-sm font-display font-extrabold font-mono-nums text-emerald-700">
+                                {formatNairaFromKobo(prod.price_kobo)}
+                              </span>
+                              <span className="text-xs font-mono-nums text-slate-500">
+                                · {prod.sales_count} {prod.sales_count === 1 ? 'sale' : 'sales'}
+                              </span>
+                              {hiddenOnExpiredFree && (
+                                <span className="text-[11px] font-semibold text-amber-700">
+                                  Hidden on Free (Pro to unlock)
+                                </span>
+                              )}
+                            </div>
+                            <p className="text-sm font-bold text-slate-950 truncate">{prod.title}</p>
+                            <p className="text-xs text-slate-500 truncate">{prod.external_url}</p>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-2 shrink-0 self-end sm:self-center">
+                          <button
+                            type="button"
+                            onClick={() => handleToggleProduct(prod)}
+                            role="switch"
+                            aria-checked={prod.is_active}
+                            aria-label={`Toggle ${prod.title}`}
+                            className={`w-11 h-6 rounded-full transition-colors p-0.5 ${
+                              prod.is_active ? 'bg-emerald-600' : 'bg-slate-300'
+                            }`}
+                          >
+                            <span
+                              className={`block h-5 w-5 rounded-full bg-white shadow transition-transform ${
+                                prod.is_active ? 'translate-x-5' : 'translate-x-0'
+                              }`}
+                            />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => startEditProduct(prod)}
+                            className="h-9 w-9 rounded-xl hover:bg-slate-100 flex items-center justify-center text-slate-600"
+                            aria-label="Edit product"
+                          >
+                            <Pencil className="h-4 w-4" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteProduct(prod.id)}
+                            className="h-9 w-9 rounded-xl hover:bg-red-50 flex items-center justify-center text-red-600"
+                            aria-label="Delete product"
+                          >
+                            <Trash2 className="h-4 w-4" />
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            </div>
+          )}
+
           {/* TAB 2: EDIT PROFILE */}
           {activeTab === 'profile' && (
             <form onSubmit={handleSaveProfile} className="space-y-6">
@@ -975,48 +1453,125 @@ export default function DashboardPage() {
                 </div>
               </div>
 
-              {/* 5 Theme Selector */}
-              <div className="rounded-3xl bg-white border border-slate-200 p-6 space-y-4">
-                <div className="flex items-center justify-between">
-                  <div>
-                    <h2 className="text-base font-display font-bold text-slate-900">Bio Page Theme</h2>
-                    <p className="text-xs text-slate-500">Light and Dark are free. Pro unlocks all 5 themes.</p>
-                  </div>
+              {/* 2 Free + 5 Premium Themes Selector */}
+              <div className="rounded-3xl bg-white border border-slate-200 p-6 space-y-5">
+                <div>
+                  <h2 className="text-base font-display font-bold text-slate-900">Bio Page & Storefront Theme</h2>
+                  <p className="text-xs text-slate-500">
+                    Free users get 2 basic themes. Active Pro unlocks all 5 high-converting luxury themes.
+                  </p>
                 </div>
 
-                <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
-                  {(Object.values(THEMES) as Array<(typeof THEMES)[ThemeId]>).map((t) => {
-                    const locked = t.proOnly && !user.is_pro;
-                    const selected = pTheme === t.id;
-                    return (
+                <div className="space-y-4">
+                  <div>
+                    <p className="text-[11px] font-bold uppercase tracking-wider text-slate-500 mb-2">
+                      Free Basic Themes (2)
+                    </p>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                      {FREE_THEME_IDS.map((tid) => {
+                        const t = THEMES[tid];
+                        const selected = pTheme === t.id;
+                        return (
+                          <button
+                            key={t.id}
+                            type="button"
+                            onClick={() => {
+                              setLockedThemeUpsell(false);
+                              setPTheme(t.id);
+                            }}
+                            className={`rounded-2xl p-3.5 text-left border transition-all flex items-center gap-3.5 ${
+                              selected
+                                ? 'border-emerald-600 ring-2 ring-emerald-500/25 bg-emerald-50/40'
+                                : 'border-slate-200 hover:border-slate-300 bg-white'
+                            }`}
+                          >
+                            <div
+                              className={`h-14 w-20 shrink-0 rounded-xl bg-gradient-to-br ${t.previewGradient} border border-slate-300`}
+                            />
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center gap-2">
+                                <p className="text-xs font-bold text-slate-900">{t.name}</p>
+                                <span className="px-1.5 py-0.5 rounded bg-slate-200 text-slate-700 text-[10px] font-bold">
+                                  FREE
+                                </span>
+                              </div>
+                              <p className="text-[11px] text-slate-500 mt-0.5">{t.description}</p>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  <div>
+                    <p className="text-[11px] font-bold uppercase tracking-wider text-purple-700 mb-2">
+                      Premium Luxury Themes (5 — Pro Only)
+                    </p>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+                      {PRO_THEME_IDS.map((tid) => {
+                        const t = THEMES[tid];
+                        const locked = !user.is_pro;
+                        const selected = pTheme === t.id;
+                        return (
+                          <button
+                            key={t.id}
+                            type="button"
+                            onClick={() => {
+                              if (locked) {
+                                setLockedThemeUpsell(true);
+                                showToast(
+                                  'error',
+                                  'This premium theme makes you sell 3 times more — Upgrade to Pro ₦1,000 for 30 days to unlock all 5 beautiful themes.'
+                                );
+                                return;
+                              }
+                              setLockedThemeUpsell(false);
+                              setPTheme(t.id);
+                            }}
+                            className={`relative rounded-2xl p-3 text-left border transition-all ${
+                              selected
+                                ? 'border-emerald-600 ring-2 ring-emerald-500/25 bg-emerald-50/40'
+                                : 'border-slate-200 hover:border-purple-300 bg-white'
+                            } ${locked ? 'opacity-85' : ''}`}
+                          >
+                            <div
+                              className={`h-16 rounded-xl bg-gradient-to-br ${t.previewGradient} border border-black/10 mb-2.5 flex items-start justify-between p-1.5`}
+                            >
+                              <span className="px-1.5 py-0.5 rounded bg-black/55 text-amber-200 text-[9px] font-bold">
+                                PREMIUM
+                              </span>
+                              {locked && (
+                                <span className="h-6 w-6 rounded-lg bg-black/65 text-amber-300 flex items-center justify-center gap-0.5">
+                                  <Lock className="h-3 w-3" />
+                                </span>
+                              )}
+                            </div>
+                            <div className="flex items-center justify-between gap-1">
+                              <p className="text-xs font-bold text-slate-900 truncate">{t.name}</p>
+                              <Crown className="h-3.5 w-3.5 text-amber-500 shrink-0" />
+                            </div>
+                            <p className="text-[11px] text-slate-500 line-clamp-2 mt-0.5">{t.description}</p>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {lockedThemeUpsell && !user.is_pro && (
+                    <div className="rounded-2xl bg-gradient-to-r from-emerald-950 to-purple-950 text-white p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                      <p className="text-xs font-semibold">
+                        This premium theme makes you sell 3 times more — Upgrade to Pro ₦1,000 for 30 days to unlock all
+                        5 beautiful themes.
+                      </p>
                       <button
-                        key={t.id}
                         type="button"
-                        onClick={() => {
-                          if (locked) {
-                            showToast('error', `${t.name} theme is for Pro creators (₦1,000/month).`);
-                            return;
-                          }
-                          setPTheme(t.id);
-                        }}
-                        className={`relative rounded-2xl p-3 text-left border transition-all ${
-                          selected
-                            ? 'border-emerald-600 ring-2 ring-emerald-500/25 bg-emerald-50/40'
-                            : 'border-slate-200 hover:border-slate-300 bg-white'
-                        } ${locked ? 'opacity-75' : ''}`}
+                        onClick={() => setActiveTab('pro')}
+                        className="h-9 px-4 rounded-xl bg-gradient-to-r from-emerald-500 to-purple-600 text-white text-xs font-bold whitespace-nowrap shrink-0"
                       >
-                        <div className={`h-14 rounded-xl bg-gradient-to-br ${t.previewGradient} border border-black/10 mb-2.5 flex items-end justify-end p-1.5`}>
-                          {locked && (
-                            <span className="h-6 w-6 rounded-lg bg-black/60 text-amber-300 flex items-center justify-center">
-                              <Crown className="h-3.5 w-3.5" />
-                            </span>
-                          )}
-                        </div>
-                        <p className="text-xs font-bold text-slate-900 truncate">{t.name}</p>
-                        <p className="text-[11px] text-slate-500 truncate">{t.proOnly ? 'Pro' : 'Free'}</p>
+                        Upgrade to Pro
                       </button>
-                    );
-                  })}
+                    </div>
+                  )}
                 </div>
               </div>
 
@@ -1174,13 +1729,13 @@ export default function DashboardPage() {
             </div>
           )}
 
-          {/* TAB 4: TIPS & EARNINGS */}
+          {/* TAB 4: UNIFIED EARNINGS (TIPS + STORE SALES) */}
           {activeTab === 'tips' && (
             <div className="space-y-6">
               <div>
-                <h1 className="text-2xl font-display font-bold text-slate-950">Tips & Earnings</h1>
+                <h1 className="text-2xl font-display font-bold text-slate-950">Earnings</h1>
                 <p className="text-sm text-slate-600">
-                  90% of every verified Paystack tip goes to you (10% platform commission).
+                  90% of every verified Paystack tip and Digital Store sale goes straight to your Pending Balance.
                 </p>
               </div>
 
@@ -1213,55 +1768,106 @@ export default function DashboardPage() {
                   </div>
                 </div>
 
-                <div className="rounded-3xl bg-white border border-slate-200 p-6 flex flex-col justify-between">
+                <div className="rounded-3xl bg-white border border-slate-200 p-6 flex flex-col justify-between gap-4">
                   <div>
                     <p className="text-xs font-semibold text-slate-500">Total Lifetime Earnings (Net 90%)</p>
                     <p className="text-4xl font-display font-extrabold font-mono-nums text-slate-950 mt-2">
                       {formatNairaFromKobo(tipsData?.totalEarningsKobo ?? user.total_earnings_kobo)}
                     </p>
-                    <p className="text-xs text-slate-500 mt-2">
-                      Share your tap9ja.com/u/{user.username} link so supporters can tap Support Me.
-                    </p>
                   </div>
-                  <div className="pt-4 border-t border-slate-100 flex items-center gap-2 text-xs text-slate-600">
-                    <HeartHandshake className="h-4 w-4 text-emerald-600" />
-                    <span>All tips are verified with Paystack before crediting.</span>
+                  <div className="grid grid-cols-2 gap-3 pt-4 border-t border-slate-100">
+                    <div className="rounded-2xl bg-slate-50 border border-slate-200/70 p-3">
+                      <p className="text-[11px] font-semibold text-slate-500 flex items-center gap-1">
+                        <HeartHandshake className="h-3.5 w-3.5 text-purple-600" />
+                        Tip Earnings
+                      </p>
+                      <p className="text-base font-display font-bold font-mono-nums text-slate-900 mt-1">
+                        {formatNairaFromKobo(tipsData?.tipEarningsKobo ?? 0)}
+                      </p>
+                    </div>
+                    <div className="rounded-2xl bg-emerald-50/70 border border-emerald-200/70 p-3">
+                      <p className="text-[11px] font-semibold text-emerald-800 flex items-center gap-1">
+                        <ShoppingBag className="h-3.5 w-3.5 text-emerald-600" />
+                        Store Earnings
+                      </p>
+                      <p className="text-base font-display font-bold font-mono-nums text-emerald-800 mt-1">
+                        {formatNairaFromKobo(tipsData?.storeEarningsKobo ?? 0)}
+                      </p>
+                    </div>
                   </div>
                 </div>
               </div>
 
-              {/* Tips Table */}
+              {/* Unified Transactions Table with Filters */}
               <div className="rounded-3xl bg-white border border-slate-200 overflow-hidden">
-                <div className="px-6 py-4 border-b border-slate-200">
-                  <h2 className="text-base font-display font-bold text-slate-900">Supporter Tips</h2>
+                <div className="px-6 py-4 border-b border-slate-200 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <h2 className="text-base font-display font-bold text-slate-900">Recent Transactions</h2>
+                  <div className="inline-flex rounded-2xl bg-slate-100 p-1">
+                    {(
+                      [
+                        { id: 'all', label: 'All' },
+                        { id: 'tips', label: 'Tips' },
+                        { id: 'store', label: 'Store Sales' },
+                      ] as const
+                    ).map((f) => (
+                      <button
+                        key={f.id}
+                        type="button"
+                        onClick={() => setEarningsFilter(f.id)}
+                        className={`h-8 px-3.5 rounded-xl text-xs font-semibold transition-colors ${
+                          earningsFilter === f.id
+                            ? 'bg-white text-slate-950 shadow-sm'
+                            : 'text-slate-600 hover:text-slate-900'
+                        }`}
+                      >
+                        {f.label}
+                      </button>
+                    ))}
+                  </div>
                 </div>
-                {!tipsData || tipsData.tips.length === 0 ? (
-                  <p className="p-6 text-sm text-slate-500">No tips received yet.</p>
+                {unifiedEarningsRows.length === 0 ? (
+                  <p className="p-6 text-sm text-slate-500">
+                    No {earningsFilter === 'store' ? 'store sales' : earningsFilter === 'tips' ? 'tips' : 'earnings'}{' '}
+                    recorded yet.
+                  </p>
                 ) : (
                   <div className="overflow-x-auto">
                     <table className="w-full text-left text-sm">
                       <thead className="bg-slate-50 text-xs text-slate-500">
                         <tr>
-                          <th className="px-6 py-3 font-semibold">From</th>
-                          <th className="px-6 py-3 font-semibold">Note</th>
+                          <th className="px-6 py-3 font-semibold">Source</th>
+                          <th className="px-6 py-3 font-semibold">Details</th>
                           <th className="px-6 py-3 font-semibold text-right">Amount</th>
                           <th className="px-6 py-3 font-semibold text-right">Your Net (90%)</th>
                           <th className="px-6 py-3 font-semibold text-right">Date</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-slate-100">
-                        {tipsData.tips.map((t) => (
-                          <tr key={t.id} className="hover:bg-slate-50/70">
-                            <td className="px-6 py-3 font-semibold text-slate-900">{t.from_name}</td>
-                            <td className="px-6 py-3 text-slate-600 max-w-xs truncate">{t.message || '—'}</td>
+                        {unifiedEarningsRows.map((row) => (
+                          <tr key={row.id} className="hover:bg-slate-50/70">
+                            <td className="px-6 py-3">
+                              <div className="flex items-center gap-2">
+                                <span
+                                  className={`px-2 py-0.5 rounded-md text-[10px] font-bold uppercase ${
+                                    row.kind === 'store'
+                                      ? 'bg-emerald-100 text-emerald-800'
+                                      : 'bg-purple-100 text-purple-800'
+                                  }`}
+                                >
+                                  {row.kind === 'store' ? 'Store' : 'Tip'}
+                                </span>
+                                <span className="font-semibold text-slate-900">{row.title}</span>
+                              </div>
+                            </td>
+                            <td className="px-6 py-3 text-slate-600 max-w-xs truncate">{row.subtitle}</td>
                             <td className="px-6 py-3 text-right font-mono-nums text-slate-700">
-                              {formatNairaFromKobo(t.amount_kobo)}
+                              {formatNairaFromKobo(row.amount_kobo)}
                             </td>
                             <td className="px-6 py-3 text-right font-mono-nums font-semibold text-emerald-700">
-                              {formatNairaFromKobo(t.net_kobo)}
+                              {formatNairaFromKobo(row.net_kobo)}
                             </td>
                             <td className="px-6 py-3 text-right text-xs font-mono-nums text-slate-500">
-                              {new Date(t.created_at).toLocaleDateString('en-NG')}
+                              {new Date(row.created_at).toLocaleDateString('en-NG')}
                             </td>
                           </tr>
                         ))}
@@ -1302,7 +1908,7 @@ export default function DashboardPage() {
                     <p className="text-sm text-slate-300 max-w-lg">
                       {user.is_pro
                         ? 'You can extend your Pro subscription by another 30 days anytime.'
-                        : 'Unlock unlimited links, verified blue tick, all 5 themes, dual music embeds, and remove the TAP9JA watermark.'}
+                        : 'Unlock unlimited links, unlimited Digital Store products, all 5 luxury themes, zero ads, verified blue tick, and remove the TAP9JA watermark.'}
                     </p>
                   </div>
 
@@ -1331,11 +1937,11 @@ export default function DashboardPage() {
                 <div className="mt-8 pt-6 border-t border-white/10 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 text-sm">
                   {[
                     'Unlimited links on your bio page',
-                    'Dual YouTube & Spotify music embeds',
-                    'All 5 themes (Naija Green, Purple Hustle, Sunset)',
-                    'Hide TAP9JA.com footer watermark',
-                    'Verified blue tick beside your name',
-                    'Full analytics charts & priority support',
+                    'Unlimited Digital Store products',
+                    'All 5 luxury themes (Selar, Gumroad, Shopify, IG, Stripe)',
+                    'Zero ads on your dashboard & bio links',
+                    'Verified blue tick & Pro Trusted Store badge',
+                    'Hide TAP9JA.com footer watermark + dual music embeds',
                   ].map((perk) => (
                     <div key={perk} className="flex items-center gap-2.5 text-slate-100">
                       <Check className="h-4 w-4 text-emerald-400 shrink-0" />

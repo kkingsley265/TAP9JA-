@@ -25,7 +25,7 @@ const SCHEMA_STATEMENTS = [
     youtube_url TEXT NOT NULL DEFAULT '',
     spotify_url TEXT NOT NULL DEFAULT '',
     whatsapp_number TEXT NOT NULL DEFAULT '',
-    theme TEXT NOT NULL DEFAULT 'light',
+    theme TEXT NOT NULL DEFAULT 'free_theme_1',
     bank_code TEXT NOT NULL DEFAULT '',
     bank_name TEXT NOT NULL DEFAULT '',
     account_number TEXT NOT NULL DEFAULT '',
@@ -119,6 +119,38 @@ const SCHEMA_STATEMENTS = [
     value TEXT NOT NULL DEFAULT '',
     updated_at TEXT NOT NULL
   )`,
+  `CREATE TABLE IF NOT EXISTS products (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    username TEXT NOT NULL,
+    title TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    price_kobo INTEGER NOT NULL,
+    product_type TEXT NOT NULL,
+    cover_url TEXT NOT NULL DEFAULT '',
+    external_url TEXT NOT NULL,
+    is_active INTEGER NOT NULL DEFAULT 1,
+    sales_count INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_products_user_created ON products (user_id, created_at)`,
+  `CREATE TABLE IF NOT EXISTS product_sales (
+    id TEXT PRIMARY KEY,
+    product_id TEXT NOT NULL,
+    product_title TEXT NOT NULL,
+    product_type TEXT NOT NULL,
+    seller_id TEXT NOT NULL,
+    seller_username TEXT NOT NULL,
+    buyer_email TEXT NOT NULL DEFAULT '',
+    amount_kobo INTEGER NOT NULL,
+    commission_kobo INTEGER NOT NULL,
+    net_kobo INTEGER NOT NULL,
+    paystack_reference TEXT UNIQUE NOT NULL,
+    status TEXT NOT NULL DEFAULT 'success',
+    created_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_sales_seller_time ON product_sales (seller_id, created_at)`,
 ];
 
 let schemaInitialized = false;
@@ -131,6 +163,11 @@ export async function ensureSchema(db: D1DatabaseLike): Promise<void> {
   schemaPromise = (async () => {
     for (const stmt of SCHEMA_STATEMENTS) {
       await db.prepare(stmt).run();
+    }
+    const userCols = await db.prepare('PRAGMA table_info(users)').all<{ name: string }>();
+    const hasThemeCol = userCols.results.some((c) => c.name === 'theme');
+    if (!hasThemeCol) {
+      await db.prepare("ALTER TABLE users ADD COLUMN theme TEXT NOT NULL DEFAULT 'free_theme_1'").run();
     }
     await seedShowcaseCreatorsIfEmpty(db);
     schemaInitialized = true;
@@ -267,6 +304,55 @@ async function seedShowcaseCreatorsIfEmpty(db: D1DatabaseLike): Promise<void> {
         await db
           .prepare(`INSERT INTO page_views (id, user_id, viewed_at, view_date, referrer) VALUES (?, ?, ?, ?, ?)`)
           .bind(generateId(), creator.id, day.toISOString(), dayStr, 'instagram')
+          .run();
+      }
+    }
+
+    if (creator.username === 'khalidbeats') {
+      const demoProducts = [
+        {
+          title: 'Afrobeats Producer Stems & Drum Kit Vol. 3',
+          description: '25 royalty-free log drum loops, vocal chops & FL Studio mixer presets ready for instant download.',
+          price_kobo: 350000,
+          product_type: 'file',
+          cover_url: '',
+          external_url: 'https://drive.google.com/',
+          sales_count: 14,
+        },
+        {
+          title: 'Private Mix & Master Breakdown (Video)',
+          description: 'Step-by-step 45 min studio session showing how I mix Afrobeats vocals to sound radio-ready.',
+          price_kobo: 500000,
+          product_type: 'video',
+          cover_url: '',
+          external_url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+          sales_count: 9,
+        },
+      ];
+      for (let pIdx = 0; pIdx < demoProducts.length; pIdx++) {
+        const prod = demoProducts[pIdx];
+        const ts = new Date(now.getTime() + pIdx * 1000).toISOString();
+        await db
+          .prepare(
+            `INSERT INTO products (
+              id, user_id, username, title, description, price_kobo, product_type, cover_url, external_url,
+              is_active, sales_count, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`
+          )
+          .bind(
+            generateId(),
+            creator.id,
+            creator.username,
+            prod.title,
+            prod.description,
+            prod.price_kobo,
+            prod.product_type,
+            prod.cover_url,
+            prod.external_url,
+            prod.sales_count,
+            ts,
+            ts
+          )
           .run();
       }
     }

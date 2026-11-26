@@ -1,4 +1,4 @@
-import type { PlatformId, ThemeId } from '../shared/platforms';
+import type { PlatformId, ProductType, ThemeId } from '../shared/platforms';
 
 export interface PublicConfig {
   paystackPublicKey: string;
@@ -46,6 +46,52 @@ export interface CreatorLink {
   created_at: string;
 }
 
+export interface PlanNotice {
+  hadExpiredPro: boolean;
+  hiddenLinksCount: number;
+  hiddenProductsCount: number;
+  revertedTheme: boolean;
+}
+
+export interface CreatorProduct {
+  id: string;
+  user_id: string;
+  username: string;
+  title: string;
+  description: string;
+  price_kobo: number;
+  product_type: ProductType;
+  cover_url: string;
+  external_url: string;
+  is_active: boolean;
+  sales_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface PublicProduct {
+  id: string;
+  title: string;
+  description: string;
+  price_kobo: number;
+  product_type: ProductType;
+  cover_url: string;
+  sales_count: number;
+}
+
+export interface ProductSaleRecord {
+  id: string;
+  product_id: string;
+  product_title: string;
+  product_type: ProductType;
+  buyer_email_masked: string;
+  amount_kobo: number;
+  commission_kobo: number;
+  net_kobo: number;
+  paystack_reference: string;
+  created_at: string;
+}
+
 export interface PublicBioResponse {
   profile: {
     username: string;
@@ -70,6 +116,7 @@ export interface PublicBioResponse {
     position: number;
     clicks: number;
   }>;
+  products?: PublicProduct[];
 }
 
 const USER_TOKEN_KEY = 'tap9ja_token';
@@ -145,6 +192,7 @@ export function openPaystackPopup(params: {
   publicKey: string;
   email: string;
   amountKobo: number;
+  referencePrefix?: string;
   metadata?: Record<string, unknown>;
   onSuccess: (reference: string) => void;
   onCancel?: (reference: string) => void;
@@ -161,7 +209,8 @@ export function openPaystackPopup(params: {
     return;
   }
 
-  const reference = `T9J_${Date.now()}_${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
+  const prefix = (params.referencePrefix || 'T9J').replace(/[^a-zA-Z0-9_-]/g, '');
+  const reference = `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8).toUpperCase()}`;
   const handler = window.PaystackPop.setup({
     key: params.publicKey,
     email: params.email,
