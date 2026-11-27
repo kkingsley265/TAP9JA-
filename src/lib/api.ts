@@ -62,6 +62,7 @@ export interface CreatorProduct {
   price_kobo: number;
   product_type: ProductType;
   cover_url: string;
+  preview_url?: string;
   external_url: string;
   is_active: boolean;
   sales_count: number;
@@ -76,6 +77,7 @@ export interface PublicProduct {
   price_kobo: number;
   product_type: ProductType;
   cover_url: string;
+  preview_url?: string;
   sales_count: number;
 }
 

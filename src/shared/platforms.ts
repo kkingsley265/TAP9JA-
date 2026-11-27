@@ -154,7 +154,8 @@ export function parseSpotifyEmbed(rawUrl: string): string | null {
     const parsed = new URL(trimmed.startsWith('http') ? trimmed : `https://${trimmed}`);
     const host = parsed.hostname.replace(/^www\./, '').toLowerCase();
     if (host !== 'open.spotify.com') return null;
-    const parts = parsed.pathname.split('/').filter(Boolean);
+    const rawParts = parsed.pathname.split('/').filter(Boolean);
+    const parts = rawParts[0]?.startsWith('intl-') ? rawParts.slice(1) : rawParts;
     if (parts[0] === 'embed' && parts[1] && parts[2]) {
       return `https://open.spotify.com/embed/${parts[1]}/${parts[2]}`;
     }
@@ -164,6 +165,108 @@ export function parseSpotifyEmbed(rawUrl: string): string | null {
   } catch {
     return null;
   }
+  return null;
+}
+
+export function parseAudiomackEmbed(rawUrl: string): string | null {
+  const trimmed = (rawUrl || '').trim();
+  if (!trimmed) return null;
+  try {
+    const parsed = new URL(trimmed.startsWith('http') ? trimmed : `https://${trimmed}`);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+    const host = parsed.hostname.replace(/^www\./, '').toLowerCase();
+    if (host !== 'audiomack.com' && host !== 'm.audiomack.com') return null;
+    const parts = parsed.pathname.split('/').filter(Boolean);
+    if (parts.length < 3) return null;
+
+    const safeSegment = (s: string) => /^[a-zA-Z0-9._~%-]+$/.test(s);
+    if (!parts.every(safeSegment)) return null;
+
+    if (parts[0] === 'embed' && parts.length >= 3) {
+      return `https://audiomack.com/${parts.join('/')}`;
+    }
+    if (['song', 'album', 'playlist'].includes(parts[1]) && parts[0] && parts[2]) {
+      return `https://audiomack.com/embed/${parts[0]}/${parts[1]}/${parts[2]}`;
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+export function parseBoomplayEmbed(rawUrl: string): string | null {
+  const trimmed = (rawUrl || '').trim();
+  if (!trimmed) return null;
+  try {
+    const parsed = new URL(trimmed.startsWith('http') ? trimmed : `https://${trimmed}`);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
+    const host = parsed.hostname.replace(/^www\./, '').toLowerCase();
+    if (host !== 'boomplay.com' && host !== 'm.boomplay.com') return null;
+    const parts = parsed.pathname.split('/').filter(Boolean);
+    const safeId = (s: string) => /^[a-zA-Z0-9_-]+$/.test(s);
+
+    if (parts[0] === 'embed' && parts[1] && safeId(parts[1])) {
+      const kind = (parts[2] || 'MUSIC').toUpperCase();
+      if (kind === 'MUSIC' || kind === 'COL') {
+        return `https://www.boomplay.com/embed/${parts[1]}/${kind}`;
+      }
+      return null;
+    }
+
+    if (parts[0] === 'songs' && parts[1] && safeId(parts[1])) {
+      return `https://www.boomplay.com/embed/${parts[1]}/MUSIC`;
+    }
+    if ((parts[0] === 'albums' || parts[0] === 'playlists') && parts[1] && safeId(parts[1])) {
+      return `https://www.boomplay.com/embed/${parts[1]}/COL`;
+    }
+    if (parts[0] === 'share' && parts[2] && safeId(parts[2])) {
+      if (parts[1] === 'music' || parts[1] === 'song' || parts[1] === 'songs') {
+        return `https://www.boomplay.com/embed/${parts[2]}/MUSIC`;
+      }
+      if (parts[1] === 'album' || parts[1] === 'albums' || parts[1] === 'playlist' || parts[1] === 'playlists') {
+        return `https://www.boomplay.com/embed/${parts[2]}/COL`;
+      }
+    }
+  } catch {
+    return null;
+  }
+  return null;
+}
+
+export type PreviewPlatform = 'youtube' | 'spotify' | 'audiomack' | 'boomplay';
+
+export interface PreviewEmbedResult {
+  platform: PreviewPlatform;
+  label: string;
+  embedUrl: string;
+  aspect: 'video' | 'audio';
+  height?: number;
+}
+
+export function parsePreviewEmbed(rawUrl: string): PreviewEmbedResult | null {
+  const trimmed = (rawUrl || '').trim();
+  if (!trimmed) return null;
+
+  const yt = parseYouTubeEmbed(trimmed);
+  if (yt) {
+    return { platform: 'youtube', label: 'YouTube', embedUrl: yt, aspect: 'video' };
+  }
+
+  const sp = parseSpotifyEmbed(trimmed);
+  if (sp) {
+    return { platform: 'spotify', label: 'Spotify', embedUrl: sp, aspect: 'audio', height: 152 };
+  }
+
+  const am = parseAudiomackEmbed(trimmed);
+  if (am) {
+    return { platform: 'audiomack', label: 'Audiomack', embedUrl: am, aspect: 'audio', height: 252 };
+  }
+
+  const bp = parseBoomplayEmbed(trimmed);
+  if (bp) {
+    return { platform: 'boomplay', label: 'Boomplay', embedUrl: bp, aspect: 'audio', height: 200 };
+  }
+
   return null;
 }
 

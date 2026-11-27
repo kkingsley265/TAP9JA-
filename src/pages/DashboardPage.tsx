@@ -13,6 +13,7 @@ import {
   Lock,
   LogOut,
   Pencil,
+  PlayCircle,
   Plus,
   QrCode,
   ShoppingBag,
@@ -47,6 +48,7 @@ import {
   formatNairaFromKobo,
   FREE_THEME_IDS,
   NIGERIAN_BANKS,
+  parsePreviewEmbed,
   PRO_THEME_IDS,
   PRODUCT_TYPES,
   THEMES,
@@ -127,6 +129,7 @@ export default function DashboardPage() {
   const [prodPrice, setProdPrice] = useState('2500');
   const [prodType, setProdType] = useState<ProductType>('video');
   const [prodCoverUrl, setProdCoverUrl] = useState('');
+  const [prodPreviewUrl, setProdPreviewUrl] = useState('');
   const [prodExternalUrl, setProdExternalUrl] = useState('');
   const [savingProduct, setSavingProduct] = useState(false);
 
@@ -514,6 +517,7 @@ export default function DashboardPage() {
     setProdPrice('2500');
     setProdType('video');
     setProdCoverUrl('');
+    setProdPreviewUrl('');
     setProdExternalUrl('');
   };
 
@@ -521,6 +525,11 @@ export default function DashboardPage() {
     e.preventDefault();
     if (!editingProductId && freeProductLimitReached) {
       showToast('error', 'Free plan limited to 3 active products — Upgrade to Pro ₦1,000/month for unlimited.');
+      return;
+    }
+    const trimmedPreview = prodPreviewUrl.trim();
+    if (trimmedPreview && !parsePreviewEmbed(trimmedPreview)) {
+      showToast('error', 'Preview Link must be a valid YouTube, Audiomack, Spotify, or Boomplay link (or leave blank).');
       return;
     }
     setSavingProduct(true);
@@ -534,6 +543,7 @@ export default function DashboardPage() {
             price_ngn: Number(prodPrice),
             product_type: prodType,
             cover_url: prodCoverUrl.trim(),
+            preview_url: trimmedPreview,
             external_url: prodExternalUrl.trim(),
           }),
         });
@@ -549,6 +559,7 @@ export default function DashboardPage() {
             price_ngn: Number(prodPrice),
             product_type: prodType,
             cover_url: prodCoverUrl.trim(),
+            preview_url: trimmedPreview,
             external_url: prodExternalUrl.trim(),
           }),
         });
@@ -593,6 +604,7 @@ export default function DashboardPage() {
     setProdPrice(String(Math.round(prod.price_kobo / 100)));
     setProdType(prod.product_type);
     setProdCoverUrl(prod.cover_url || '');
+    setProdPreviewUrl(prod.preview_url || '');
     setProdExternalUrl(prod.external_url || '');
   };
 
@@ -1244,6 +1256,42 @@ export default function DashboardPage() {
                   </div>
                 </div>
 
+                <div>
+                  <label htmlFor="prod-preview-link" className="block text-xs font-semibold text-slate-700 mb-1.5">
+                    Preview Link (plays before payment)
+                  </label>
+                  <input
+                    id="prod-preview-link"
+                    type="url"
+                    disabled={!editingProductId && freeProductLimitReached}
+                    value={prodPreviewUrl}
+                    onChange={(e) => setProdPreviewUrl(e.target.value)}
+                    placeholder="https://youtu.be/... or Spotify, Audiomack, or Boomplay link (optional)"
+                    className="w-full h-11 px-4 rounded-2xl border border-slate-200 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/30 disabled:bg-slate-100"
+                  />
+                  {prodPreviewUrl.trim() ? (
+                    (() => {
+                      const detected = parsePreviewEmbed(prodPreviewUrl);
+                      return detected ? (
+                        <p className="mt-1.5 text-xs font-medium text-emerald-700 inline-flex items-center gap-1.5">
+                          <PlayCircle className="h-3.5 w-3.5" />
+                          <span>
+                            {detected.label} preview detected — plays directly on your TAP9JA page before buyers pay.
+                          </span>
+                        </p>
+                      ) : (
+                        <p className="mt-1.5 text-xs font-medium text-amber-700">
+                          Paste a YouTube, Audiomack, Spotify, or Boomplay link so the preview plays inside TAP9JA.
+                        </p>
+                      );
+                    })()
+                  ) : (
+                    <p className="mt-1.5 text-[11px] text-slate-500">
+                      Optional: Paste a YouTube, Audiomack, Spotify, or Boomplay sample link. Buyers watch or listen right on your store before paying.
+                    </p>
+                  )}
+                </div>
+
                 <div className="flex justify-end">
                   <button
                     type="submit"
@@ -1298,6 +1346,12 @@ export default function DashboardPage() {
                               {hiddenOnExpiredFree && (
                                 <span className="text-[11px] font-semibold text-amber-700">
                                   Hidden on Free (Pro to unlock)
+                                </span>
+                              )}
+                              {prod.preview_url && parsePreviewEmbed(prod.preview_url) && (
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-50 text-emerald-700 text-[10px] font-bold">
+                                  <PlayCircle className="h-3 w-3" />
+                                  {parsePreviewEmbed(prod.preview_url)?.label} Preview
                                 </span>
                               )}
                             </div>

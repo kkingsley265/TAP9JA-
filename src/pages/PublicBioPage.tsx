@@ -4,6 +4,7 @@ import {
   Eye,
   HeartHandshake,
   MessageCircle,
+  PlayCircle,
   QrCode,
   Share2,
   ShieldCheck,
@@ -23,6 +24,7 @@ import { apiFetch, type PublicBioResponse, type PublicProduct } from '../lib/api
 import {
   formatNairaFromKobo,
   isProActive,
+  parsePreviewEmbed,
   parseSpotifyEmbed,
   parseYouTubeEmbed,
   PRODUCT_TYPES,
@@ -361,6 +363,7 @@ export default function PublicBioPage() {
               <div className="space-y-3">
                 {products.map((product) => {
                   const typeMeta = PRODUCT_TYPES[product.product_type] || PRODUCT_TYPES.file;
+                  const previewEmbed = product.preview_url ? parsePreviewEmbed(product.preview_url) : null;
                   return (
                     <div key={product.id} className={`p-3.5 sm:p-4 ${theme.productCardBg}`}>
                       <div className="flex gap-3 items-start">
@@ -377,6 +380,12 @@ export default function PublicBioPage() {
                             <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold uppercase ${theme.badgeBg}`}>
                               {typeMeta.shortLabel}
                             </span>
+                            {previewEmbed && (
+                              <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-500/15 text-emerald-500 text-[10px] font-bold">
+                                <PlayCircle className="h-3 w-3" />
+                                Free Preview
+                              </span>
+                            )}
                             {product.sales_count > 0 && (
                               <span className={`text-[11px] font-mono-nums ${theme.textMuted}`}>
                                 · {product.sales_count} bought
@@ -391,6 +400,39 @@ export default function PublicBioPage() {
                           )}
                         </div>
                       </div>
+
+                      {previewEmbed && (
+                        <div className="mt-3 rounded-xl overflow-hidden border border-current/15 bg-black/5">
+                          <div className="px-2.5 py-1.5 flex items-center justify-between gap-2 border-b border-current/10 bg-black/5">
+                            <span className={`inline-flex items-center gap-1.5 text-[11px] font-semibold ${theme.textPrimary}`}>
+                              <PlayCircle className="h-3.5 w-3.5 text-emerald-500 shrink-0" />
+                              Preview ({previewEmbed.label})
+                            </span>
+                            <span className={`text-[10px] ${theme.textMuted}`}>Plays here before payment</span>
+                          </div>
+                          {previewEmbed.aspect === 'video' ? (
+                            <div className="aspect-video w-full bg-black">
+                              <iframe
+                                src={previewEmbed.embedUrl}
+                                title={`${product.title} preview`}
+                                loading="lazy"
+                                className="w-full h-full border-0"
+                                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
+                                allowFullScreen
+                              />
+                            </div>
+                          ) : (
+                            <iframe
+                              src={previewEmbed.embedUrl}
+                              title={`${product.title} preview`}
+                              loading="lazy"
+                              className="w-full border-0 block"
+                              height={previewEmbed.height || 180}
+                              allow="autoplay; clipboard-write; encrypted-media; fullscreen; picture-in-picture"
+                            />
+                          )}
+                        </div>
+                      )}
 
                       <div className="mt-3 pt-2.5 border-t border-current/10 flex items-center justify-between gap-3">
                         <span className={`text-base font-display font-extrabold font-mono-nums ${theme.priceColor}`}>

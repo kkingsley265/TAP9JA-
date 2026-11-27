@@ -128,6 +128,7 @@ const SCHEMA_STATEMENTS = [
     price_kobo INTEGER NOT NULL,
     product_type TEXT NOT NULL,
     cover_url TEXT NOT NULL DEFAULT '',
+    preview_url TEXT NOT NULL DEFAULT '',
     external_url TEXT NOT NULL,
     is_active INTEGER NOT NULL DEFAULT 1,
     sales_count INTEGER NOT NULL DEFAULT 0,
@@ -168,6 +169,11 @@ export async function ensureSchema(db: D1DatabaseLike): Promise<void> {
     const hasThemeCol = userCols.results.some((c) => c.name === 'theme');
     if (!hasThemeCol) {
       await db.prepare("ALTER TABLE users ADD COLUMN theme TEXT NOT NULL DEFAULT 'free_theme_1'").run();
+    }
+    const productCols = await db.prepare('PRAGMA table_info(products)').all<{ name: string }>();
+    const hasPreviewUrlCol = productCols.results.some((c) => c.name === 'preview_url');
+    if (!hasPreviewUrlCol) {
+      await db.prepare("ALTER TABLE products ADD COLUMN preview_url TEXT NOT NULL DEFAULT ''").run();
     }
     await seedShowcaseCreatorsIfEmpty(db);
     schemaInitialized = true;

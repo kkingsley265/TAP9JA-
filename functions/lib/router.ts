@@ -6,6 +6,7 @@ import {
   NIGERIAN_BANKS,
   normalizeLinkUrl,
   normalizeThemeKey,
+  parsePreviewEmbed,
   parseProductEmbed,
   PRODUCT_TYPES,
   resolveThemeId,
@@ -85,6 +86,7 @@ interface ProductRow {
   price_kobo: number;
   product_type: string;
   cover_url: string;
+  preview_url: string;
   external_url: string;
   is_active: number;
   sales_count: number;
@@ -1124,6 +1126,7 @@ export async function handleApiRequest(req: Request, env: EnvBindings): Promise<
       price_kobo: Number(p.price_kobo),
       product_type: p.product_type as ProductType,
       cover_url: p.cover_url,
+      preview_url: p.preview_url || '',
       external_url: p.external_url,
       is_active: Boolean(p.is_active),
       sales_count: Number(p.sales_count || 0),
@@ -1151,6 +1154,7 @@ export async function handleApiRequest(req: Request, env: EnvBindings): Promise<
       price_ngn?: number | string;
       product_type?: string;
       cover_url?: string;
+      preview_url?: string;
       external_url?: string;
     }>(req);
     if (!body) return jsonResponse({ error: 'Invalid JSON payload' }, 400);
@@ -1160,6 +1164,7 @@ export async function handleApiRequest(req: Request, env: EnvBindings): Promise<
     const priceNgn = Number(body.price_ngn);
     const productType = (body.product_type || '').trim() as ProductType;
     const coverUrl = (body.cover_url || '').trim();
+    const rawPreviewUrl = (body.preview_url || '').trim();
     const externalUrl = normalizeLinkUrl(body.external_url || '');
 
     if (title.length < 2) {
@@ -1173,6 +1178,20 @@ export async function handleApiRequest(req: Request, env: EnvBindings): Promise<
     }
     if (coverUrl && (!isValidHttpUrl(coverUrl) || coverUrl.startsWith('demo:'))) {
       return jsonResponse({ error: 'Cover image must be a valid http/https image URL.' }, 400);
+    }
+    let previewUrl = '';
+    if (rawPreviewUrl) {
+      const parsedPreview = parsePreviewEmbed(rawPreviewUrl);
+      if (!parsedPreview) {
+        return jsonResponse(
+          { error: 'Preview Link must be a valid YouTube, Audiomack, Spotify, or Boomplay link (or leave blank).' },
+          400
+        );
+      }
+      previewUrl =
+        rawPreviewUrl.startsWith('http://') || rawPreviewUrl.startsWith('https://')
+          ? rawPreviewUrl
+          : `https://${rawPreviewUrl}`;
     }
     if (!externalUrl || (!externalUrl.startsWith('http://') && !externalUrl.startsWith('https://'))) {
       return jsonResponse({ error: 'Please paste a valid http/https delivery link for your product.' }, 400);
@@ -1201,11 +1220,11 @@ export async function handleApiRequest(req: Request, env: EnvBindings): Promise<
 
     await env.DB.prepare(
       `INSERT INTO products (
-        id, user_id, username, title, description, price_kobo, product_type, cover_url, external_url,
+        id, user_id, username, title, description, price_kobo, product_type, cover_url, preview_url, external_url,
         is_active, sales_count, created_at, updated_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?)`
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, ?, ?)`
     )
-      .bind(id, user.id, user.username, title, description, priceKobo, productType, coverUrl, externalUrl, now, now)
+      .bind(id, user.id, user.username, title, description, priceKobo, productType, coverUrl, previewUrl, externalUrl, now, now)
       .run();
 
     const created = await env.DB.prepare('SELECT * FROM products WHERE id = ?').bind(id).first<ProductRow>();
@@ -1214,6 +1233,7 @@ export async function handleApiRequest(req: Request, env: EnvBindings): Promise<
         product: created
           ? {
               ...created,
+              preview_url: created.preview_url || '',
               price_kobo: Number(created.price_kobo),
               is_active: Boolean(created.is_active),
               sales_count: Number(created.sales_count || 0),
@@ -1242,6 +1262,7 @@ export async function handleApiRequest(req: Request, env: EnvBindings): Promise<
         price_ngn?: number | string;
         product_type?: string;
         cover_url?: string;
+        preview_url?: string;
         external_url?: string;
         is_active?: boolean;
       }>(req);
@@ -1275,6 +1296,26 @@ export async function handleApiRequest(req: Request, env: EnvBindings): Promise<
         return jsonResponse({ error: 'Cover image must be a valid http/https image URL.' }, 400);
       }
 
+      let previewUrl = existing.preview_url || '';
+      if (body.preview_url !== undefined) {
+        const rawPreviewUrl = body.preview_url.trim();
+        if (!rawPreviewUrl) {
+          previewUrl = '';
+        } else {
+          const parsedPreview = parsePreviewEmbed(rawPreviewUrl);
+          if (!parsedPreview) {
+            return jsonResponse(
+              { error: 'Preview Link must be a valid YouTube, Audiomack, Spotify, or Boomplay link (or leave blank).' },
+              400
+            );
+          }
+          previewUrl =
+            rawPreviewUrl.startsWith('http://') || rawPreviewUrl.startsWith('https://')
+              ? rawPreviewUrl
+              : `https://${rawPreviewUrl}`;
+        }
+      }
+
       const externalUrl =
         body.external_url !== undefined ? normalizeLinkUrl(body.external_url) : existing.external_url;
       if (!externalUrl || (!externalUrl.startsWith('http://') && !externalUrl.startsWith('https://'))) {
@@ -1304,10 +1345,10 @@ export async function handleApiRequest(req: Request, env: EnvBindings): Promise<
       await env.DB.prepare(
         `UPDATE products SET
           title = ?, description = ?, price_kobo = ?, product_type = ?,
-          cover_url = ?, external_url = ?, is_active = ?, updated_at = ?
+          cover_url = ?, preview_url = ?, external_url = ?, is_active = ?, updated_at = ?
          WHERE id = ? AND user_id = ?`
       )
-        .bind(title, description, priceKobo, productType, coverUrl, externalUrl, nextActive, now, productId, user.id)
+        .bind(title, description, priceKobo, productType, coverUrl, previewUrl, externalUrl, nextActive, now, productId, user.id)
         .run();
 
       const updated = await env.DB.prepare('SELECT * FROM products WHERE id = ?').bind(productId).first<ProductRow>();
@@ -1315,6 +1356,7 @@ export async function handleApiRequest(req: Request, env: EnvBindings): Promise<
         product: updated
           ? {
               ...updated,
+              preview_url: updated.preview_url || '',
               price_kobo: Number(updated.price_kobo),
               is_active: Boolean(updated.is_active),
               sales_count: Number(updated.sales_count || 0),
@@ -1647,7 +1689,7 @@ export async function handleApiRequest(req: Request, env: EnvBindings): Promise<
     // CRITICAL: NEVER select external_url on public profile endpoint!
     // Enforce Free limits: max 5 links, max 3 oldest active products, 2 ugly free themes, max 1 music embed, watermark visible
     const productsRes = await env.DB.prepare(
-      'SELECT id, title, description, price_kobo, product_type, cover_url, sales_count, created_at FROM products WHERE user_id = ? AND is_active = 1 ORDER BY created_at ASC'
+      'SELECT id, title, description, price_kobo, product_type, cover_url, preview_url, sales_count, created_at FROM products WHERE user_id = ? AND is_active = 1 ORDER BY created_at ASC'
     )
       .bind(user.id)
       .all<{
@@ -1657,6 +1699,7 @@ export async function handleApiRequest(req: Request, env: EnvBindings): Promise<
         price_kobo: number;
         product_type: string;
         cover_url: string;
+        preview_url: string;
         sales_count: number;
         created_at: string;
       }>();
@@ -1692,6 +1735,7 @@ export async function handleApiRequest(req: Request, env: EnvBindings): Promise<
         price_kobo: Number(p.price_kobo),
         product_type: p.product_type,
         cover_url: p.cover_url,
+        preview_url: p.preview_url || '',
         sales_count: Number(p.sales_count || 0),
       })),
     });
