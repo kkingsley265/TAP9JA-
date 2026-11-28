@@ -152,6 +152,18 @@ const SCHEMA_STATEMENTS = [
     created_at TEXT NOT NULL
   )`,
   `CREATE INDEX IF NOT EXISTS idx_sales_seller_time ON product_sales (seller_id, created_at)`,
+  `CREATE TABLE IF NOT EXISTS platform_supports (
+    id TEXT PRIMARY KEY,
+    supporter_name TEXT NOT NULL DEFAULT '',
+    supporter_email TEXT NOT NULL DEFAULT '',
+    source_username TEXT NOT NULL DEFAULT '',
+    amount_kobo INTEGER NOT NULL,
+    paystack_reference TEXT UNIQUE NOT NULL,
+    receipt_sent INTEGER NOT NULL DEFAULT 0,
+    status TEXT NOT NULL DEFAULT 'success',
+    created_at TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_platform_supports_time ON platform_supports (created_at)`,
 ];
 
 let schemaInitialized = false;

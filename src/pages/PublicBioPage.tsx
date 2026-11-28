@@ -19,6 +19,7 @@ import { FreePlanAdModal } from '../components/FreePlanAdModal';
 import { PlatformBadgeIcon, VerifiedBlueTick } from '../components/PlatformIcon';
 import { QrModal } from '../components/QrModal';
 import { StoreBuyModal } from '../components/StoreBuyModal';
+import { SupportTap9jaModal } from '../components/SupportTap9jaModal';
 import { TipModal } from '../components/TipModal';
 import { apiFetch, type PublicBioResponse, type PublicProduct } from '../lib/api';
 import {
@@ -42,6 +43,7 @@ export default function PublicBioPage() {
   const [error, setError] = useState('');
   const [qrOpen, setQrOpen] = useState(false);
   const [tipOpen, setTipOpen] = useState(false);
+  const [supportTap9jaOpen, setSupportTap9jaOpen] = useState(false);
   const [selectedProduct, setSelectedProduct] = useState<PublicProduct | null>(null);
   const [copiedShare, setCopiedShare] = useState(false);
   const [adConfig, setAdConfig] = useState<{ adsEnabled: boolean; adCode: string } | null>(null);
@@ -53,6 +55,7 @@ export default function PublicBioPage() {
     setAdConfig(null);
     setPendingLink(null);
     setSelectedProduct(null);
+    setSupportTap9jaOpen(false);
     apiFetch<PublicBioResponse>(
       `/api/public/profile/${encodeURIComponent(username)}${isPreview ? '?preview=1' : ''}`,
       { authMode: 'none', cache: 'no-store' }
@@ -479,14 +482,40 @@ export default function PublicBioPage() {
         </div>
       </main>
 
-      {/* Conditional Watermark: Shown ONLY for Free / Expired Pro */}
-      {showWatermark && (
+      {/* Footer Area: Free = 2 existing options + 3rd "Support TAP9JA ❤️" option | Pro = 1 bold "Create your own free link ✨" option */}
+      {showWatermark ? (
         <footer className="mt-6 pb-4 text-center w-full max-w-[480px] mx-auto">
+          <div className={`inline-flex flex-wrap items-center justify-center gap-x-2 gap-y-1.5 text-xs font-medium ${theme.textMuted}`}>
+            <Link
+              to="/"
+              className="hover:underline underline-offset-4 transition-opacity"
+            >
+              Made with TAP9JA.com
+            </Link>
+            <span aria-hidden="true">·</span>
+            <Link
+              to="/register"
+              className="hover:underline underline-offset-4 transition-opacity"
+            >
+              Create your own free link
+            </Link>
+            <span aria-hidden="true">·</span>
+            <button
+              type="button"
+              onClick={() => setSupportTap9jaOpen(true)}
+              className="font-semibold hover:underline underline-offset-4 transition-opacity cursor-pointer"
+            >
+              Support TAP9JA ❤️
+            </button>
+          </div>
+        </footer>
+      ) : (
+        <footer className="mt-7 pb-5 text-center w-full max-w-[480px] mx-auto">
           <Link
-            to="/"
-            className={`inline-block text-xs font-medium hover:underline underline-offset-4 transition-opacity ${theme.textMuted}`}
+            to="/register"
+            className="inline-flex items-center justify-center gap-2 px-6 py-3 rounded-2xl bg-gradient-to-r from-emerald-500 to-purple-600 text-white text-xs sm:text-sm font-display font-bold tracking-tight shadow-lg shadow-emerald-950/30 hover:scale-[1.02] hover:opacity-95 active:scale-[0.99] transition-all"
           >
-            Made with TAP9JA.com - Create your own free link
+            Create your own free link ✨
           </Link>
         </footer>
       )}
@@ -503,6 +532,13 @@ export default function PublicBioPage() {
         username={profile.username}
         creatorName={profile.name}
       />
+      {showWatermark && (
+        <SupportTap9jaModal
+          open={supportTap9jaOpen}
+          onClose={() => setSupportTap9jaOpen(false)}
+          sourceUsername={profile.username}
+        />
+      )}
       <StoreBuyModal
         open={Boolean(selectedProduct)}
         onClose={() => setSelectedProduct(null)}

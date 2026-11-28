@@ -255,6 +255,7 @@ async function verifyPaystackTransaction(
   amountKobo?: number;
   currency?: string;
   status?: string;
+  customerEmail?: string;
   error?: string;
 }> {
   const res = await fetch(`https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`, {
@@ -273,6 +274,7 @@ async function verifyPaystackTransaction(
       amount?: number;
       currency?: string;
       reference?: string;
+      customer?: { email?: string };
     };
   };
 
@@ -290,6 +292,7 @@ async function verifyPaystackTransaction(
     amountKobo: Number(payload.data.amount || 0),
     currency: payload.data.currency || 'NGN',
     status: payload.data.status,
+    customerEmail: (payload.data.customer?.email || '').trim().slice(0, 120),
   };
 }
 
@@ -345,6 +348,14 @@ async function recordVerifiedTip(
     .bind(params.reference)
     .first();
   if (existingSale) {
+    return { status: 'conflict', amountKobo: 0, commissionKobo: 0, netKobo: 0 };
+  }
+
+  const existingSupport = await db
+    .prepare('SELECT id FROM platform_supports WHERE paystack_reference = ?')
+    .bind(params.reference)
+    .first();
+  if (existingSupport) {
     return { status: 'conflict', amountKobo: 0, commissionKobo: 0, netKobo: 0 };
   }
 
@@ -442,6 +453,14 @@ async function recordVerifiedPro(
     .bind(params.reference)
     .first();
   if (existingSale) {
+    return { status: 'conflict', expiresAt: '', user: null };
+  }
+
+  const existingSupport = await db
+    .prepare('SELECT id FROM platform_supports WHERE paystack_reference = ?')
+    .bind(params.reference)
+    .first();
+  if (existingSupport) {
     return { status: 'conflict', expiresAt: '', user: null };
   }
 
@@ -545,6 +564,14 @@ async function recordVerifiedProductSale(
     return { status: 'conflict', amountKobo: 0, commissionKobo: 0, netKobo: 0 };
   }
 
+  const existingSupport = await db
+    .prepare('SELECT id FROM platform_supports WHERE paystack_reference = ?')
+    .bind(params.reference)
+    .first();
+  if (existingSupport) {
+    return { status: 'conflict', amountKobo: 0, commissionKobo: 0, netKobo: 0 };
+  }
+
   const amountKobo = Math.round(params.amountKobo);
   const commissionKobo = Math.round(amountKobo * 0.1);
   const netKobo = amountKobo - commissionKobo;
@@ -613,6 +640,207 @@ async function recordVerifiedProductSale(
     .run();
 
   return { status: 'credited', amountKobo, commissionKobo, netKobo };
+}
+
+function buildPlatformSupportReceiptHtml(params: {
+  supporterName: string;
+  amountNgnFormatted: string;
+  reference: string;
+  dateFormatted: string;
+}): string {
+  const safeName = escapeHtml(params.supporterName || 'Supporter');
+  const safeAmount = escapeHtml(params.amountNgnFormatted);
+  const safeRef = escapeHtml(params.reference);
+  const safeDate = escapeHtml(params.dateFormatted);
+  return `<!doctype html>
+<html>
+  <body style="margin:0;padding:24px;background-color:#f8fafc;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;color:#0f172a;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:520px;margin:0 auto;background:#ffffff;border-radius:24px;border:1px solid #e2e8f0;overflow:hidden;">
+      <tr>
+        <td style="padding:28px 32px;background:linear-gradient(135deg,#059669 0%,#6d28d9 100%);color:#ffffff;">
+          <div style="font-size:20px;font-weight:800;letter-spacing:-0.02em;">9J TAP9JA</div>
+          <div style="font-size:13px;opacity:0.9;margin-top:4px;">Thank You For Supporting Free Nigerian Creators</div>
+        </td>
+      </tr>
+      <tr>
+        <td style="padding:32px;">
+          <h1 style="margin:0 0 12px;font-size:20px;font-weight:700;color:#0f172a;">Support Receipt</h1>
+          <p style="margin:0 0 20px;font-size:14px;line-height:1.6;color:#475569;">
+            Hi ${safeName}, thank you! You just helped keep TAP9JA free for thousands of Nigerian creators.
+          </p>
+          <div style="margin:0 0 20px;padding:18px 20px;background:#f1f5f9;border:1px solid #cbd5e1;border-radius:16px;">
+            <div style="font-size:11px;font-weight:600;text-transform:uppercase;color:#64748b;margin-bottom:4px;">Amount Paid</div>
+            <div style="font-size:26px;font-weight:800;color:#059669;margin-bottom:12px;">${safeAmount}</div>
+            <div style="font-size:12px;color:#475569;margin-bottom:4px;"><strong>Reference:</strong> ${safeRef}</div>
+            <div style="font-size:12px;color:#475569;"><strong>Date:</strong> ${safeDate}</div>
+          </div>
+          <p style="margin:0;font-size:12px;line-height:1.6;color:#64748b;">
+            100% of this contribution supports TAP9JA servers and free tools for creators across Nigeria.
+          </p>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>`;
+}
+
+async function sendPlatformSupportReceiptEmail(
+  env: EnvBindings,
+  params: { supporterName: string; supporterEmail: string; amountKobo: number; reference: string; createdAt: string }
+): Promise<boolean> {
+  const resendKey = (env.RESEND_API_KEY || '').trim();
+  const email = (params.supporterEmail || '').trim().toLowerCase();
+  if (!resendKey || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return false;
+  }
+
+  const amountNgnFormatted = `₦${(Number(params.amountKobo) / 100).toLocaleString('en-NG', {
+    minimumFractionDigits: Number(params.amountKobo) % 100 === 0 ? 0 : 2,
+    maximumFractionDigits: 2,
+  })}`;
+  const dateFormatted = new Date(params.createdAt).toLocaleString('en-NG');
+  const rawFrom = (env.RESEND_FROM_EMAIL || 'nkemjika@tap9ja.com.ng').trim() || 'nkemjika@tap9ja.com.ng';
+  const fromHeader = rawFrom.includes('<') ? rawFrom : `TAP9JA <${rawFrom}>`;
+
+  try {
+    const resendRes = await fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${resendKey}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        from: fromHeader,
+        to: [email],
+        subject: `Thank you for supporting TAP9JA! (${amountNgnFormatted} Receipt)`,
+        html: buildPlatformSupportReceiptHtml({
+          supporterName: params.supporterName,
+          amountNgnFormatted,
+          reference: params.reference,
+          dateFormatted,
+        }),
+        text: `Hi ${params.supporterName},\n\nThank you! You just helped keep TAP9JA free for everyone.\n\nAmount Paid: ${amountNgnFormatted}\nReference: ${params.reference}\nDate: ${dateFormatted}\n\nWith gratitude,\nThe TAP9JA Team`,
+      }),
+    });
+    return resendRes.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function recordVerifiedPlatformSupport(
+  db: D1DatabaseLike,
+  env: EnvBindings,
+  params: {
+    reference: string;
+    amountKobo: number;
+    supporterName: string;
+    supporterEmail: string;
+    sourceUsername: string;
+  }
+): Promise<{
+  status: 'credited' | 'already_credited' | 'conflict';
+  amountKobo: number;
+  receiptSent: boolean;
+}> {
+  const existing = await db
+    .prepare('SELECT id, amount_kobo, receipt_sent, supporter_email, supporter_name, created_at FROM platform_supports WHERE paystack_reference = ?')
+    .bind(params.reference)
+    .first<{
+      id: string;
+      amount_kobo: number;
+      receipt_sent: number;
+      supporter_email: string;
+      supporter_name: string;
+      created_at: string;
+    }>();
+
+  if (existing) {
+    let receiptSent = Number(existing.receipt_sent) === 1;
+    const targetEmail = existing.supporter_email || params.supporterEmail;
+    if (!receiptSent && targetEmail) {
+      const sentNow = await sendPlatformSupportReceiptEmail(env, {
+        supporterName: existing.supporter_name || params.supporterName,
+        supporterEmail: targetEmail,
+        amountKobo: Number(existing.amount_kobo),
+        reference: params.reference,
+        createdAt: existing.created_at,
+      });
+      if (sentNow) {
+        receiptSent = true;
+        await db
+          .prepare('UPDATE platform_supports SET receipt_sent = 1, supporter_email = ? WHERE id = ?')
+          .bind(targetEmail, existing.id)
+          .run();
+      }
+    }
+    return {
+      status: 'already_credited',
+      amountKobo: Number(existing.amount_kobo),
+      receiptSent,
+    };
+  }
+
+  const [dupTip, dupPro, dupSale] = await Promise.all([
+    db.prepare('SELECT id FROM tips WHERE paystack_reference = ?').bind(params.reference).first(),
+    db.prepare('SELECT id FROM pro_payments WHERE paystack_reference = ?').bind(params.reference).first(),
+    db.prepare('SELECT id FROM product_sales WHERE paystack_reference = ?').bind(params.reference).first(),
+  ]);
+  if (dupTip || dupPro || dupSale) {
+    return { status: 'conflict', amountKobo: 0, receiptSent: false };
+  }
+
+  const amountKobo = Math.round(params.amountKobo);
+  const id = generateId();
+  const now = new Date().toISOString();
+
+  const insertRes = await db
+    .prepare(
+      `INSERT OR IGNORE INTO platform_supports (
+        id, supporter_name, supporter_email, source_username, amount_kobo, paystack_reference, receipt_sent, status, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, 0, 'success', ?)`
+    )
+    .bind(
+      id,
+      params.supporterName,
+      params.supporterEmail,
+      params.sourceUsername,
+      amountKobo,
+      params.reference,
+      now
+    )
+    .run();
+
+  if ((insertRes.meta?.changes ?? 0) === 0) {
+    const raced = await db
+      .prepare('SELECT amount_kobo, receipt_sent FROM platform_supports WHERE paystack_reference = ?')
+      .bind(params.reference)
+      .first<{ amount_kobo: number; receipt_sent: number }>();
+    if (raced) {
+      return {
+        status: 'already_credited',
+        amountKobo: Number(raced.amount_kobo),
+        receiptSent: Number(raced.receipt_sent) === 1,
+      };
+    }
+    return { status: 'conflict', amountKobo: 0, receiptSent: false };
+  }
+
+  let receiptSent = false;
+  if (params.supporterEmail) {
+    receiptSent = await sendPlatformSupportReceiptEmail(env, {
+      supporterName: params.supporterName,
+      supporterEmail: params.supporterEmail,
+      amountKobo,
+      reference: params.reference,
+      createdAt: now,
+    });
+    if (receiptSent) {
+      await db.prepare('UPDATE platform_supports SET receipt_sent = 1 WHERE id = ?').bind(id).run();
+    }
+  }
+
+  return { status: 'credited', amountKobo, receiptSent };
 }
 
 export async function handleApiRequest(req: Request, env: EnvBindings): Promise<Response> {
@@ -1831,6 +2059,12 @@ export async function handleApiRequest(req: Request, env: EnvBindings): Promise<
     if (dupSale) {
       return jsonResponse({ error: 'This payment reference has already been processed.' }, 409);
     }
+    const dupSupport = await env.DB.prepare('SELECT id FROM platform_supports WHERE paystack_reference = ?')
+      .bind(reference)
+      .first();
+    if (dupSupport) {
+      return jsonResponse({ error: 'This payment reference has already been processed.' }, 409);
+    }
 
     const verification = await verifyPaystackTransaction(reference, secretKey);
     if (!verification.ok || !verification.amountKobo || verification.amountKobo < 10000) {
@@ -1911,6 +2145,12 @@ export async function handleApiRequest(req: Request, env: EnvBindings): Promise<
       .bind(reference)
       .first();
     if (dupSale) {
+      return jsonResponse({ error: 'This payment reference has already been processed.' }, 409);
+    }
+    const dupSupport = await env.DB.prepare('SELECT id FROM platform_supports WHERE paystack_reference = ?')
+      .bind(reference)
+      .first();
+    if (dupSupport) {
       return jsonResponse({ error: 'This payment reference has already been processed.' }, 409);
     }
 
@@ -2010,7 +2250,10 @@ export async function handleApiRequest(req: Request, env: EnvBindings): Promise<
 
     const dupTip = await env.DB.prepare('SELECT id FROM tips WHERE paystack_reference = ?').bind(reference).first();
     const dupPro = await env.DB.prepare('SELECT id FROM pro_payments WHERE paystack_reference = ?').bind(reference).first();
-    if (dupTip || dupPro) {
+    const dupSupport = await env.DB.prepare('SELECT id FROM platform_supports WHERE paystack_reference = ?')
+      .bind(reference)
+      .first();
+    if (dupTip || dupPro || dupSupport) {
       return jsonResponse({ error: 'This payment reference has already been processed.' }, 409);
     }
 
@@ -2049,6 +2292,101 @@ export async function handleApiRequest(req: Request, env: EnvBindings): Promise<
         externalUrl: product.external_url,
         embed,
       },
+    });
+  }
+
+  // Verify Paystack TAP9JA Platform Support (100% goes to Admin Earnings, NOT creator)
+  if (method === 'POST' && path === '/api/payments/verify-platform-support') {
+    const secretKey = (env.PAYSTACK_SECRET_KEY || '').trim();
+    const publicKey = (env.PAYSTACK_PUBLIC_KEY || '').trim();
+    if (!secretKey) {
+      return jsonResponse({ error: 'Paystack secret key is not configured on the server.' }, 500);
+    }
+    const pkMode = getPaystackKeyMode(publicKey);
+    const skMode = getPaystackKeyMode(secretKey);
+    if (pkMode && skMode && pkMode !== skMode) {
+      return jsonResponse(
+        {
+          error: `Paystack key mismatch: Public Key is ${pkMode.toUpperCase()} while Secret Key is ${skMode.toUpperCase()}. Update both keys in Cloudflare Environment Variables.`,
+        },
+        500
+      );
+    }
+
+    const body = await parseJsonBody<{
+      reference?: string;
+      supporterName?: string;
+      supporterEmail?: string;
+      sourceUsername?: string;
+    }>(req);
+    const reference = (body?.reference || '').trim();
+    if (!reference) {
+      return jsonResponse({ error: 'Payment reference is required.' }, 400);
+    }
+
+    const supporterName = (body?.supporterName || 'TAP9JA Supporter').trim().slice(0, 80) || 'TAP9JA Supporter';
+    const supporterEmail = (body?.supporterEmail || '').trim().toLowerCase().slice(0, 120);
+    const sourceUsername = (body?.sourceUsername || '').trim().toLowerCase().slice(0, 50);
+
+    const existing = await env.DB.prepare(
+      'SELECT amount_kobo, receipt_sent FROM platform_supports WHERE paystack_reference = ?'
+    )
+      .bind(reference)
+      .first<{ amount_kobo: number; receipt_sent: number }>();
+
+    if (existing) {
+      const res = await recordVerifiedPlatformSupport(env.DB, env, {
+        reference,
+        amountKobo: Number(existing.amount_kobo),
+        supporterName,
+        supporterEmail,
+        sourceUsername,
+      });
+      return jsonResponse({
+        verified: true,
+        amountKobo: res.amountKobo,
+        reference,
+        receiptSent: res.receiptSent,
+        alreadyRecorded: true,
+      });
+    }
+
+    const [dupTip, dupPro, dupSale] = await Promise.all([
+      env.DB.prepare('SELECT id FROM tips WHERE paystack_reference = ?').bind(reference).first(),
+      env.DB.prepare('SELECT id FROM pro_payments WHERE paystack_reference = ?').bind(reference).first(),
+      env.DB.prepare('SELECT id FROM product_sales WHERE paystack_reference = ?').bind(reference).first(),
+    ]);
+    if (dupTip || dupPro || dupSale) {
+      return jsonResponse({ error: 'This payment reference has already been processed.' }, 409);
+    }
+
+    const verification = await verifyPaystackTransaction(reference, secretKey);
+    if (!verification.ok || !verification.amountKobo || verification.amountKobo < 10000) {
+      return jsonResponse(
+        { error: verification.error || 'Could not verify support payment with Paystack (minimum ₦100).' },
+        400
+      );
+    }
+
+    const finalEmail = supporterEmail || verification.customerEmail || '';
+    const result = await recordVerifiedPlatformSupport(env.DB, env, {
+      reference,
+      amountKobo: verification.amountKobo,
+      supporterName,
+      supporterEmail: finalEmail,
+      sourceUsername,
+    });
+
+    if (result.status === 'conflict') {
+      return jsonResponse({ error: 'This payment reference has already been processed.' }, 409);
+    }
+
+    return jsonResponse({
+      verified: true,
+      amountKobo: result.amountKobo,
+      reference,
+      receiptSent: result.receiptSent,
+      alreadyRecorded: result.status === 'already_credited',
     });
   }
 
@@ -2165,6 +2503,17 @@ export async function handleApiRequest(req: Request, env: EnvBindings): Promise<
           amountKobo,
         });
       }
+    } else if ((metaType === 'platform_support' || reference.toLowerCase().startsWith('sup_')) && amountKobo >= 10000) {
+      const supporterName = String(meta.supporter_name || 'TAP9JA Supporter').trim().slice(0, 80) || 'TAP9JA Supporter';
+      const supporterEmail = String(meta.supporter_email || tx.customer?.email || '').trim().toLowerCase().slice(0, 120);
+      const sourceUsername = String(meta.source_username || '').trim().toLowerCase().slice(0, 50);
+      await recordVerifiedPlatformSupport(env.DB, env, {
+        reference,
+        amountKobo,
+        supporterName,
+        supporterEmail,
+        sourceUsername,
+      });
     }
 
     return jsonResponse({ received: true });
@@ -2250,6 +2599,24 @@ export async function handleApiRequest(req: Request, env: EnvBindings): Promise<
 
       const payoutsRes = await env.DB.prepare('SELECT * FROM payouts ORDER BY paid_at DESC LIMIT 200').all();
 
+      const supportAgg = await env.DB.prepare(
+        'SELECT COUNT(*) as total_count, COALESCE(SUM(amount_kobo), 0) as total_kobo FROM platform_supports'
+      ).first<{ total_count: number; total_kobo: number }>();
+
+      const recentSupportsRes = await env.DB.prepare(
+        `SELECT id, supporter_name, supporter_email, source_username, amount_kobo, paystack_reference, receipt_sent, created_at
+         FROM platform_supports ORDER BY created_at DESC LIMIT 200`
+      ).all<{
+        id: string;
+        supporter_name: string;
+        supporter_email: string;
+        source_username: string;
+        amount_kobo: number;
+        paystack_reference: string;
+        receipt_sent: number;
+        created_at: string;
+      }>();
+
       const prodAgg = await env.DB.prepare(
         'SELECT COUNT(*) as total_products, COALESCE(SUM(is_active), 0) as active_products FROM products'
       ).first<{ total_products: number; active_products: number }>();
@@ -2284,6 +2651,8 @@ export async function handleApiRequest(req: Request, env: EnvBindings): Promise<
       const totalCommissionKobo = tipsRes.results.reduce((s, t) => s + Number(t.commission_kobo || 0), 0);
       const totalPendingPayoutKobo = users.reduce((s, u) => s + Number(u.pending_balance_kobo || 0), 0);
       const totalProRevenueKobo = proRes.results.reduce((s, p) => s + Number(p.amount_kobo || 0), 0);
+      const totalPlatformSupportKobo = Number(supportAgg?.total_kobo ?? 0);
+      const totalPlatformSupportCount = Number(supportAgg?.total_count ?? 0);
 
       let freeThemeUsers = 0;
       let premiumThemeUsers = 0;
@@ -2306,6 +2675,8 @@ export async function handleApiRequest(req: Request, env: EnvBindings): Promise<
           totalPendingPayoutKobo,
           totalProRevenueKobo,
           totalProPaymentsCount: proRes.results.length,
+          totalPlatformSupportKobo,
+          totalPlatformSupportCount,
         },
         storeStats: {
           totalProducts: Number(prodAgg?.total_products ?? 0),
@@ -2328,6 +2699,16 @@ export async function handleApiRequest(req: Request, env: EnvBindings): Promise<
           commission_kobo: Number(s.commission_kobo),
           net_kobo: Number(s.net_kobo),
           paystack_reference: s.paystack_reference,
+          created_at: s.created_at,
+        })),
+        platformSupports: recentSupportsRes.results.map((s) => ({
+          id: s.id,
+          supporter_name: s.supporter_name,
+          supporter_email_masked: maskEmail(s.supporter_email),
+          source_username: s.source_username,
+          amount_kobo: Number(s.amount_kobo),
+          paystack_reference: s.paystack_reference,
+          receipt_sent: Boolean(s.receipt_sent),
           created_at: s.created_at,
         })),
         users,

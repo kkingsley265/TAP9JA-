@@ -34,6 +34,8 @@ interface AdminOverview {
     totalPendingPayoutKobo: number;
     totalProRevenueKobo: number;
     totalProPaymentsCount: number;
+    totalPlatformSupportKobo?: number;
+    totalPlatformSupportCount?: number;
   };
   users: UserProfile[];
   tips: Array<{
@@ -89,6 +91,16 @@ interface AdminOverview {
     account_name: string;
     amount_kobo: number;
     paid_at: string;
+  }>;
+  platformSupports?: Array<{
+    id: string;
+    supporter_name: string;
+    supporter_email_masked: string;
+    source_username: string;
+    amount_kobo: number;
+    paystack_reference: string;
+    receipt_sent: boolean;
+    created_at: string;
   }>;
 }
 
@@ -407,26 +419,98 @@ export default function AdminPage() {
           <>
             {/* TAB A: STATS */}
             {tab === 'stats' && (
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                {[
-                  { label: 'Total Users', value: data.stats.totalUsers.toLocaleString('en-NG') },
-                  { label: 'Free Users', value: data.stats.freeUsers.toLocaleString('en-NG') },
-                  { label: 'Active Pro Users', value: data.stats.proUsers.toLocaleString('en-NG') },
-                  { label: 'Total Tips Volume', value: formatNairaFromKobo(data.stats.totalTipsVolumeKobo) },
-                  { label: 'Total Commission (10%)', value: formatNairaFromKobo(data.stats.totalCommissionKobo) },
-                  { label: 'Total Pending Payout', value: formatNairaFromKobo(data.stats.totalPendingPayoutKobo) },
-                  {
-                    label: 'Total Pro Payments',
-                    value: `${formatNairaFromKobo(data.stats.totalProRevenueKobo)} (${data.stats.totalProPaymentsCount})`,
-                  },
-                ].map((stat) => (
-                  <div key={stat.label} className="rounded-3xl bg-white border border-slate-200 p-6">
-                    <p className="text-xs font-medium text-slate-500">{stat.label}</p>
-                    <p className="text-2xl font-display font-extrabold font-mono-nums text-slate-950 mt-2">
-                      {stat.value}
-                    </p>
+              <div className="space-y-6">
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                  {[
+                    { label: 'Total Users', value: data.stats.totalUsers.toLocaleString('en-NG') },
+                    { label: 'Free Users', value: data.stats.freeUsers.toLocaleString('en-NG') },
+                    { label: 'Active Pro Users', value: data.stats.proUsers.toLocaleString('en-NG') },
+                    { label: 'Total Tips Volume', value: formatNairaFromKobo(data.stats.totalTipsVolumeKobo) },
+                    { label: 'Total Commission (10%)', value: formatNairaFromKobo(data.stats.totalCommissionKobo) },
+                    { label: 'Total Pending Payout', value: formatNairaFromKobo(data.stats.totalPendingPayoutKobo) },
+                    {
+                      label: 'Total Pro Payments',
+                      value: `${formatNairaFromKobo(data.stats.totalProRevenueKobo)} (${data.stats.totalProPaymentsCount})`,
+                    },
+                    {
+                      label: 'TAP9JA Support (100% Admin)',
+                      value: `${formatNairaFromKobo(data.stats.totalPlatformSupportKobo ?? 0)} (${data.stats.totalPlatformSupportCount ?? 0})`,
+                    },
+                  ].map((stat) => (
+                    <div key={stat.label} className="rounded-3xl bg-white border border-slate-200 p-6">
+                      <p className="text-xs font-medium text-slate-500">{stat.label}</p>
+                      <p className="text-2xl font-display font-extrabold font-mono-nums text-slate-950 mt-2">
+                        {stat.value}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+
+                {/* TAP9JA Platform Support Donations (100% Admin) */}
+                <div className="rounded-3xl bg-white border border-slate-200 overflow-hidden">
+                  <div className="p-5 border-b border-slate-200 flex items-center justify-between">
+                    <div>
+                      <h2 className="text-base font-display font-bold text-slate-950">
+                        Support TAP9JA Contributions ({data.platformSupports?.length ?? 0})
+                      </h2>
+                      <p className="text-xs text-slate-500">
+                        100% of Support TAP9JA ❤️ contributions go directly to Admin earnings.
+                      </p>
+                    </div>
                   </div>
-                ))}
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left text-sm">
+                      <thead className="bg-slate-50 text-xs text-slate-500">
+                        <tr>
+                          <th className="px-5 py-3 font-semibold">Supporter</th>
+                          <th className="px-5 py-3 font-semibold">Email (Masked)</th>
+                          <th className="px-5 py-3 font-semibold">Source Page</th>
+                          <th className="px-5 py-3 font-semibold text-right">Amount</th>
+                          <th className="px-5 py-3 font-semibold">Receipt</th>
+                          <th className="px-5 py-3 font-semibold">Reference</th>
+                          <th className="px-5 py-3 font-semibold text-right">Date</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {!data.platformSupports || data.platformSupports.length === 0 ? (
+                          <tr>
+                            <td colSpan={7} className="px-5 py-8 text-center text-slate-500">
+                              No TAP9JA support contributions recorded yet.
+                            </td>
+                          </tr>
+                        ) : (
+                          data.platformSupports.map((sup) => (
+                            <tr key={sup.id} className="hover:bg-slate-50/70">
+                              <td className="px-5 py-3 font-medium text-slate-900">{sup.supporter_name}</td>
+                              <td className="px-5 py-3 font-mono-nums text-xs text-slate-600">
+                                {sup.supporter_email_masked}
+                              </td>
+                              <td className="px-5 py-3 text-xs font-semibold text-emerald-700">
+                                {sup.source_username ? `@${sup.source_username}` : '—'}
+                              </td>
+                              <td className="px-5 py-3 text-right font-mono-nums font-bold text-purple-700">
+                                {formatNairaFromKobo(sup.amount_kobo)}
+                              </td>
+                              <td className="px-5 py-3 text-xs">
+                                {sup.receipt_sent ? (
+                                  <span className="text-emerald-700 font-semibold">Email Sent</span>
+                                ) : (
+                                  <span className="text-slate-500">Paystack Receipt</span>
+                                )}
+                              </td>
+                              <td className="px-5 py-3 font-mono-nums text-xs text-slate-500">
+                                {sup.paystack_reference}
+                              </td>
+                              <td className="px-5 py-3 text-right font-mono-nums text-xs text-slate-500">
+                                {new Date(sup.created_at).toLocaleString('en-NG')}
+                              </td>
+                            </tr>
+                          ))
+                        )}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
               </div>
             )}
 
